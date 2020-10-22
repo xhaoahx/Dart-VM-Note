@@ -20,7 +20,7 @@ class GCMarker;
 // 老生代页面大小：512KB = 524288B = 4194304 bit = 65536 字
 static constexpr intptr_t kOldPageSize = 512 * KB;
 static constexpr intptr_t kOldPageSizeInWords = kOldPageSize / kWordSize;
-// 页面掩码，即 -kOldPageSize 
+// 页面掩码，即 ~(2^(10 + 9)-1) = 1111..1100...0 (46 个 1，18 个 0)
 static constexpr intptr_t kOldPageMask = ~(kOldPageSize - 1);
 
 static constexpr intptr_t kBitVectorWordsPerBlock = 1;
@@ -50,6 +50,7 @@ class OldPage {
 
   uword object_start() const { return memory_->start() + ObjectStartOffset(); }
   uword object_end() const { return object_end_; }
+  // 已使用的内存大小
   uword used_in_bytes() const { return used_in_bytes_; }
   void set_used_in_bytes(uword value) {
     ASSERT(Utils::IsAligned(value, kObjectAlignment));
@@ -91,7 +92,7 @@ class OldPage {
     return reinterpret_cast<OldPage*>(addr & kOldPageMask);
   }
 
-  // 修改页面类型为 Executable
+  // 修改给定对象类型为 Executable
   static ObjectPtr ToExecutable(ObjectPtr obj) {
     OldPage* page = Of(obj);
     VirtualMemory* memory = page->memory_;
@@ -149,10 +150,10 @@ class OldPage {
       card_table_ = reinterpret_cast<uint8_t*>(
           calloc(card_table_size(), sizeof(uint8_t)));
     }
-    // 
+    // 以偏移值作为 index
     intptr_t offset =
         reinterpret_cast<uword>(slot) - reinterpret_cast<uword>(this);
-    intptr_t index = offset >> kBytesPerCardLog2;
+    intptr_t index = offset >> kBytesPerCardLog2; // offset >> 10
     ASSERT((index >= 0) && (index < card_table_size()));
     card_table_[index] = 1;
   }
@@ -166,8 +167,8 @@ class OldPage {
     object_end_ = value;
   }
   
-  // 分配内存  
-  // Returns NULL on OOM.
+  // 创建新的 OldPage 
+  // Out of Memory 时返回 NULL.
   static OldPage* Allocate(intptr_t size_in_words,
                            PageType type,
                            const char* name);
@@ -226,14 +227,12 @@ class PageSpaceController {
                       int garbage_collection_time_ratio);
   ~PageSpaceController();
 
-  // 
-  // Returns whether growing to 'after' should trigger a GC.
-  // This method can be called before allocation (e.g., pretenuring) or after
-  // (e.g., promotion), as it does not change the state of the controller.
+  // 返回但 SpaceUsage 达到 after 之后是否触发 GC
+  // 此方法可用在分配内存的前后调用，且不会改变 Controller 的状态
   bool ReachedHardThreshold(SpaceUsage after) const;
   bool ReachedSoftThreshold(SpaceUsage after) const;
 
-  // Returns whether an idle GC is worthwhile.
+  // 返回当处于 Idel 状态时，GC 是否值得
   bool ReachedIdleThreshold(SpaceUsage current) const;
 
   // 在每一次垃圾回收之后调用来更新 controller 状态
@@ -246,6 +245,7 @@ class PageSpaceController {
 
   void set_last_usage(SpaceUsage current) { last_usage_ = current; }
 
+  /// 状态控制
   void Enable() { is_enabled_ = true; }
   void Disable() { is_enabled_ = false; }
   bool is_enabled() { return is_enabled_; }
@@ -297,14 +297,21 @@ class PageSpaceController {
   DISALLOW_IMPLICIT_CONSTRUCTORS(PageSpaceController);
 };
 
+/// Page 空间记录，被 Heap 持有用于管理 OldPages
 class PageSpace {
  public:
   enum GrowthPolicy { kControlGrowth, kForceGrowth };
+  // GC 状态
   enum Phase {
+    // 完成
     kDone,
+    // 正在标记
     kMarking,
+    // 等待终结
     kAwaitingFinalization,
+    // 清除 large 对象
     kSweepingLarge,
+    // 清除 regular 对象
     kSweepingRegular
   };
 
@@ -319,6 +326,7 @@ class PageSpace {
     bool is_protected =
         (type == OldPage::kExecutable) && FLAG_write_protect_code;
     bool is_locked = false;
+    // 从空闲分区表上分配
     return TryAllocateInternal(size, &freelists_[type], type, growth_policy,
                                is_protected, is_locked);
   }
@@ -362,6 +370,8 @@ class PageSpace {
   void UpdateMaxUsed();
 
   int64_t ExternalInWords() const { return usage_.external_in_words; }
+    
+  /// 获取当前容量
   SpaceUsage GetCurrentUsage() const {
     MutexLocker ml(&pages_lock_);
     return usage_;
@@ -388,10 +398,9 @@ class PageSpace {
 
   void VisitRememberedCards(ObjectPointerVisitor* visitor) const;
 
-  ObjectPtr FindObject(FindObjectVisitor* visitor,
-                       OldPage::PageType type) const;
+  ObjectPtr FindObject(FindObjectVisitor* visitor,OldPage::PageType type) const;
 
-  // Collect the garbage in the page space using mark-sweep or mark-compact.
+  // 在此页面上使用 “标记-清理” 或者 “标记-整理” 算法进行 GC
   void CollectGarbage(bool compact, bool finalize);
 
   void AddRegionsToObjectSet(ObjectSet* set) const;
@@ -449,13 +458,14 @@ class PageSpace {
     usage_.external_in_words -= size_in_words;
   }
 
-  // Bulk data allocation.
+  // 获取所有类型的空闲分区表
   FreeList* DataFreeList(intptr_t i = 0) {
     return &freelists_[OldPage::kData + i];
   }
   void AcquireLock(FreeList* freelist);
   void ReleaseLock(FreeList* freelist);
 
+  // 在放置 Data 的空闲分区表上分配
   uword TryAllocateDataLocked(FreeList* freelist,
                               intptr_t size,
                               GrowthPolicy growth_policy) {
@@ -465,25 +475,32 @@ class PageSpace {
                                is_protected, is_locked);
   }
 
+  // 任务锁
   Monitor* tasks_lock() const { return &tasks_lock_; }
   intptr_t tasks() const { return tasks_; }
   void set_tasks(intptr_t val) {
     ASSERT(val >= 0);
     tasks_ = val;
   }
+  
+  // 并发标记任务
   intptr_t concurrent_marker_tasks() const { return concurrent_marker_tasks_; }
   void set_concurrent_marker_tasks(intptr_t val) {
     ASSERT(val >= 0);
     concurrent_marker_tasks_ = val;
   }
+ 
+  // GC 阶段
   Phase phase() const { return phase_; }
   void set_phase(Phase val) { phase_ = val; }
 
-  // Attempt to allocate from bump block rather than normal freelist.
+  // 尝试在空闲分区表上的 Bump 区分配
   uword TryAllocateDataBumpLocked(intptr_t size) {
     return TryAllocateDataBumpLocked(&freelists_[OldPage::kData], size);
   }
   uword TryAllocateDataBumpLocked(FreeList* freelist, intptr_t size);
+    
+  
   DART_FORCE_INLINE
   uword TryAllocatePromoLocked(FreeList* freelist, intptr_t size) {
     uword result = freelist->TryAllocateBumpLocked(size);
@@ -496,7 +513,7 @@ class PageSpace {
 
   void SetupImagePage(void* pointer, uword size, bool is_executable);
 
-  // Return any bump allocation block to the freelist.
+  // 归还任何 Bump 区的分配到空闲分区表
   void AbandonBumpAllocation();
   // Have threads release marking stack blocks, etc.
   void AbandonMarkingForShutdown();
@@ -508,6 +525,7 @@ class PageSpace {
 
   bool IsObjectFromImagePages(ObjectPtr object);
 
+  // 合并其他空间
   void MergeFrom(PageSpace* donor);
 
  private:
@@ -527,17 +545,21 @@ class PageSpace {
     kAllowedGrowth = 3
   };
 
+  /// 以下函数用于在 OldPage 上分配指定 size 的内存
+  // 分配内部调用
   uword TryAllocateInternal(intptr_t size,
                             FreeList* freelist,
                             OldPage::PageType type,
                             GrowthPolicy growth_policy,
                             bool is_protected,
                             bool is_locked);
+  // 在新页分配
   uword TryAllocateInFreshPage(intptr_t size,
                                FreeList* freelist,
                                OldPage::PageType type,
                                GrowthPolicy growth_policy,
                                bool is_locked);
+  // 在 Large 新页分配
   uword TryAllocateInFreshLargePage(intptr_t size,
                                     OldPage::PageType type,
                                     GrowthPolicy growth_policy);
@@ -557,18 +579,26 @@ class PageSpace {
   OldPage* AllocatePage(OldPage::PageType type, bool link = true);
   OldPage* AllocateLargePage(intptr_t size, OldPage::PageType type);
 
+  // 裁剪指定的 page
   void TruncateLargePage(OldPage* page, intptr_t new_object_size_in_bytes);
+  // 释放指定的 page
   void FreePage(OldPage* page, OldPage* previous_page);
   void FreeLargePage(OldPage* page, OldPage* previous_page);
+  // 释放所有的 page
   void FreePages(OldPage* pages);
 
+  // OldPage GC 算法和实现
   void CollectGarbageHelper(bool compact,
                             bool finalize,
                             int64_t pre_wait_for_sweepers,
                             int64_t pre_safe_point);
+  // 清理 Large page
   void SweepLarge();
+  // 清理 page
   void Sweep();
+  // 并发清理
   void ConcurrentSweep(IsolateGroup* isolate_group);
+  // 整理
   void Compact(Thread* thread);
 
   static intptr_t LargePageSizeInWordsFor(intptr_t size);
@@ -585,16 +615,14 @@ class PageSpace {
   }
 
   Heap* const heap_;
-
-  // One list for executable pages at freelists_[OldPage::kExecutable].
-  // FLAG_scavenger_tasks count of lists for data pages starting at
-  // freelists_[OldPage::kData]. The sweeper inserts into the data page
-  // freelists round-robin. The scavenger workers each use one of the data
-  // page freelists without locking.
+  
+  // 在 freelists_[OldPage::kExecutable] 处有一个储存 executable 数据的页面
+  // 从 freelists_[OldPage::kData] 开始，有 FLAG_scavenger_tasks 个用于保存数据的页面。sweeper 循环向页面插入数据，
+  // 每个 scavenger workers 使用一个页面而不进行锁定
   const intptr_t num_freelists_;
   FreeList* freelists_;
 
-  // Use ExclusivePageIterator for safe access to these.
+  // 使用 ExclusivePageIterator 来进行安全的访问
   mutable Mutex pages_lock_;
   OldPage* pages_ = nullptr;
   OldPage* pages_tail_ = nullptr;
@@ -604,11 +632,10 @@ class PageSpace {
   OldPage* large_pages_tail_ = nullptr;
   OldPage* image_pages_ = nullptr;
 
-  // Various sizes being tracked for this generation.
+  // 正在为这一代跟踪各种大小。
   intptr_t max_capacity_in_words_;
 
-  // NOTE: The capacity component of usage_ is updated by the concurrent
-  // sweeper. Use (Increase)CapacityInWords(Locked) for thread-safe access.
+  // 此与被并发清理器修改
   SpaceUsage usage_;
   RelaxedAtomic<intptr_t> allocated_black_in_words_;
 
@@ -684,7 +711,7 @@ DEFINE_FLAG(bool,
             "Print free list statistics after a GC");
 DEFINE_FLAG(bool, log_growth, false, "Log PageSpace growth policy decisions.");
 
-// 老生代分配内存
+// 创建老生代页面
 OldPage* OldPage::Allocate(intptr_t size_in_words,
                            PageType type,
                            const char* name) {
@@ -754,6 +781,7 @@ void OldPage::VisitObjects(ObjectVisitor* visitor) const {
   ASSERT(obj_addr == end_addr);
 }
 
+/// 遍历对象指针（以OBjectPtr 的方式访问）
 void OldPage::VisitObjectPointers(ObjectPointerVisitor* visitor) const {
   ASSERT(Thread::Current()->IsAtSafepoint() ||
          (Thread::Current()->task_kind() == Thread::kCompactorTask));
@@ -767,6 +795,7 @@ void OldPage::VisitObjectPointers(ObjectPointerVisitor* visitor) const {
   ASSERT(obj_addr == end_addr);
 }
 
+/// 访问记忆卡
 void OldPage::VisitRememberedCards(ObjectPointerVisitor* visitor) {
   ASSERT(Thread::Current()->IsAtSafepoint() ||
          (Thread::Current()->task_kind() == Thread::kScavengerTask));
@@ -868,9 +897,12 @@ void OldPage::WriteProtect(bool read_only) {
 // based on the device's actual speed.
 static const intptr_t kConservativeInitialMarkSpeed = 20;
 
+/// PageSpace 构造函数
 PageSpace::PageSpace(Heap* heap, intptr_t max_capacity_in_words)
     : heap_(heap),
+      // freeList 的数量
       num_freelists_(Utils::Maximum(FLAG_scavenger_tasks, 1) + 1),
+      
       freelists_(new FreeList[num_freelists_]),
       pages_lock_(),
       max_capacity_in_words_(max_capacity_in_words),
@@ -883,7 +915,9 @@ PageSpace::PageSpace(Heap* heap, intptr_t max_capacity_in_words)
 #if defined(DEBUG)
       iterating_thread_(NULL),
 #endif
+      // 控制器
       page_space_controller_(heap,
+                             // flag 位
                              FLAG_old_gen_growth_space_ratio,
                              FLAG_old_gen_growth_rate,
                              FLAG_old_gen_growth_time_ratio),
@@ -892,7 +926,7 @@ PageSpace::PageSpace(Heap* heap, intptr_t max_capacity_in_words)
       collections_(0),
       mark_words_per_micro_(kConservativeInitialMarkSpeed),
       enable_concurrent_mark_(FLAG_concurrent_mark) {
-  // We aren't holding the lock but no one can reference us yet.
+  // 此时没有持有锁，但是依然可用更新：因为没有其他对象可以访问此类
   UpdateMaxCapacityLocked();
   UpdateMaxUsed();
 
@@ -908,6 +942,7 @@ PageSpace::~PageSpace() {
       ml.Wait();
     }
   }
+  /// 释放所有的 Page
   FreePages(pages_);
   FreePages(exec_pages_);
   FreePages(large_pages_);
@@ -916,12 +951,15 @@ PageSpace::~PageSpace() {
   delete[] freelists_;
 }
 
+// 对于给定的 size，返回一个合适的 LargePage Size
 intptr_t PageSpace::LargePageSizeInWordsFor(intptr_t size) {
   intptr_t page_size = Utils::RoundUp(size + OldPage::ObjectStartOffset(),
                                       VirtualMemory::PageSize());
   return page_size >> kWordSizeLog2;
 }
 
+    
+/// 向 PageSpace 中添加新的 OldPage
 void PageSpace::AddPageLocked(OldPage* page) {
   if (pages_ == nullptr) {
     pages_ = page;
@@ -955,6 +993,7 @@ void PageSpace::AddExecPageLocked(OldPage* page) {
   exec_pages_tail_ = page;
 }
 
+/// 在 PageSpace 中移除指定的 OldPage
 void PageSpace::RemovePageLocked(OldPage* page, OldPage* previous_page) {
   if (previous_page != NULL) {
     previous_page->set_next(page->next());
@@ -988,6 +1027,7 @@ void PageSpace::RemoveExecPageLocked(OldPage* page, OldPage* previous_page) {
   }
 }
 
+// 创建一个页面
 OldPage* PageSpace::AllocatePage(OldPage::PageType type, bool link) {
   {
     MutexLocker ml(&pages_lock_);
@@ -998,6 +1038,8 @@ OldPage* PageSpace::AllocatePage(OldPage::PageType type, bool link) {
   }
   const bool is_exec = (type == OldPage::kExecutable);
   const char* name = Heap::RegionName(is_exec ? Heap::kCode : Heap::kOld);
+    
+  /// 使用虚拟内存分配一个 kOldPageSizeInWords 的内存，并且封装成 OldPage 对象
   OldPage* page = OldPage::Allocate(kOldPageSizeInWords, type, name);
   if (page == nullptr) {
     RELEASE_ASSERT(!FLAG_abort_on_oom);
@@ -1005,6 +1047,7 @@ OldPage* PageSpace::AllocatePage(OldPage::PageType type, bool link) {
     return nullptr;
   }
 
+  /// 以下部分互斥访问
   MutexLocker ml(&pages_lock_);
   if (link) {
     if (is_exec) {
@@ -1015,13 +1058,16 @@ OldPage* PageSpace::AllocatePage(OldPage::PageType type, bool link) {
   }
 
   page->set_object_end(page->memory_->end());
-  if ((type != OldPage::kExecutable) && (heap_ != nullptr) &&
-      (heap_->isolate_group() != Dart::vm_isolate()->group())) {
+  if ((type != OldPage::kExecutable) && 
+      (heap_ != nullptr) &&
+      (heap_->isolate_group() != Dart::vm_isolate()->group())
+     ) {
     page->AllocateForwardingPage();
   }
   return page;
 }
 
+/// 创建 Large 
 OldPage* PageSpace::AllocateLargePage(intptr_t size, OldPage::PageType type) {
   const intptr_t page_size_in_words = LargePageSizeInWordsFor(size);
   {
@@ -1046,12 +1092,12 @@ OldPage* PageSpace::AllocateLargePage(intptr_t size, OldPage::PageType type) {
     AddLargePageLocked(page);
   }
 
-  // Only one object in this page (at least until Array::MakeFixedLength
-  // is called).
+  // 此页上只有一个对象 (at least until Array::MakeFixedLength is called).
   page->set_object_end(page->object_start() + size);
   return page;
 }
 
+// 裁剪 Large Page 到 new_object_size_in_bytes
 void PageSpace::TruncateLargePage(OldPage* page,
                                   intptr_t new_object_size_in_bytes) {
   const intptr_t old_object_size_in_bytes =
@@ -1068,6 +1114,7 @@ void PageSpace::TruncateLargePage(OldPage* page,
   }
 }
 
+// 释放 Page
 void PageSpace::FreePage(OldPage* page, OldPage* previous_page) {
   bool is_exec = (page->type() == OldPage::kExecutable);
   {
@@ -1091,6 +1138,7 @@ void PageSpace::FreeLargePage(OldPage* page, OldPage* previous_page) {
   page->Deallocate();
 }
 
+// 释放所有 Page
 void PageSpace::FreePages(OldPage* pages) {
   OldPage* page = pages;
   while (page != NULL) {
@@ -1113,6 +1161,7 @@ void PageSpace::EvaluateConcurrentMarking(GrowthPolicy growth_policy) {
   }
 }
 
+/// 在新的 Page 中分配给定的 size
 uword PageSpace::TryAllocateInFreshPage(intptr_t size,
                                         FreeList* freelist,
                                         OldPage::PageType type,
@@ -1127,6 +1176,8 @@ uword PageSpace::TryAllocateInFreshPage(intptr_t size,
   after_allocation.used_in_words += size >> kWordSizeLog2;
   // Can we grow by one page?
   after_allocation.capacity_in_words += kOldPageSizeInWords;
+    
+    
   if (growth_policy == kForceGrowth ||
       !page_space_controller_.ReachedHardThreshold(after_allocation)) {
     OldPage* page = AllocatePage(type);
@@ -1137,9 +1188,11 @@ uword PageSpace::TryAllocateInFreshPage(intptr_t size,
     result = page->object_start();
     // Note: usage_.capacity_in_words is increased by AllocatePage.
     usage_.used_in_words += (size >> kWordSizeLog2);
-    // Enqueue the remainder in the free list.
+    // 计算剩余的空闲空间，即新 Page 除去请求的 size 之外的空间大小
     uword free_start = result + size;
     intptr_t free_size = page->object_end() - free_start;
+      
+    // 把新空间加入到空闲分区表
     if (free_size > 0) {
       if (is_locked) {
         freelist->FreeLocked(free_start, free_size);
@@ -1151,6 +1204,7 @@ uword PageSpace::TryAllocateInFreshPage(intptr_t size,
   return result;
 }
 
+/// 在新的 Large Page 上分配
 uword PageSpace::TryAllocateInFreshLargePage(intptr_t size,
                                              OldPage::PageType type,
                                              GrowthPolicy growth_policy) {
@@ -1180,6 +1234,7 @@ uword PageSpace::TryAllocateInFreshLargePage(intptr_t size,
   return result;
 }
 
+/// 在 PageSpace 中分配给定的 size 的内存
 uword PageSpace::TryAllocateInternal(intptr_t size,
                                      FreeList* freelist,
                                      OldPage::PageType type,
@@ -1189,19 +1244,23 @@ uword PageSpace::TryAllocateInternal(intptr_t size,
   ASSERT(size >= kObjectAlignment);
   ASSERT(Utils::IsAligned(size, kObjectAlignment));
   uword result = 0;
+  // 如果可以在空闲分区表上分配，即 size < 64 KB
   if (Heap::IsAllocatableViaFreeLists(size)) {
     if (is_locked) {
       result = freelist->TryAllocateLocked(size, is_protected);
     } else {
       result = freelist->TryAllocate(size, is_protected);
     }
+    // 如果在空闲分区表上的空间不足
     if (result == 0) {
+      // 在新的 page 上分配
       result = TryAllocateInFreshPage(size, freelist, type, growth_policy,
                                       is_locked);
       // usage_ is updated by the call above.
     } else {
       usage_.used_in_words += (size >> kWordSizeLog2);
     }
+  // 否则在新的 Large 页面上进行分配
   } else {
     result = TryAllocateInFreshLargePage(size, type, growth_policy);
     // usage_ is updated by the call above.
@@ -1220,6 +1279,7 @@ void PageSpace::ReleaseLock(FreeList* freelist) {
   freelist->mutex()->Unlock();
 }
 
+/// 以下为 Page 迭代器
 class BasePageIterator : ValueObject {
  public:
   explicit BasePageIterator(const PageSpace* space) : space_(space) {}
@@ -1317,6 +1377,8 @@ class ExclusiveCodePageIterator : ValueObject {
   OldPage* page_;
 };
 
+    
+/// 使得列表可以迭代
 void PageSpace::MakeIterable() const {
   // Assert not called from concurrent sweeper task.
   // TODO(koda): Use thread/task identity when implemented.
@@ -1360,6 +1422,7 @@ void PageSpace::UpdateMaxUsed() {
   isolate_group->GetHeapOldUsedMaxMetric()->SetValue(UsedInWords() * kWordSize);
 }
 
+// 是否包含某一地址，在所有的 page 上查找
 bool PageSpace::Contains(uword addr) const {
   for (ExclusivePageIterator it(this); !it.Done(); it.Advance()) {
     if (it.page()->Contains(addr)) {
@@ -1378,6 +1441,7 @@ bool PageSpace::ContainsUnsafe(uword addr) const {
   return false;
 }
 
+// 查找指定类型的地址
 bool PageSpace::Contains(uword addr, OldPage::PageType type) const {
   if (type == OldPage::kExecutable) {
     // Fast path executable pages.
@@ -1413,6 +1477,7 @@ void PageSpace::AddRegionsToObjectSet(ObjectSet* set) const {
   }
 }
 
+/// 访问对象
 void PageSpace::VisitObjects(ObjectVisitor* visitor) const {
   for (ExclusivePageIterator it(this); !it.Done(); it.Advance()) {
     it.page()->VisitObjects(visitor);
@@ -1469,6 +1534,7 @@ void PageSpace::VisitRememberedCards(ObjectPointerVisitor* visitor) const {
   }
 }
 
+/// 查找对象
 ObjectPtr PageSpace::FindObject(FindObjectVisitor* visitor,
                                 OldPage::PageType type) const {
   if (type == OldPage::kExecutable) {
@@ -1505,84 +1571,6 @@ void PageSpace::WriteProtect(bool read_only) {
   }
 }
 
-#ifndef PRODUCT
-void PageSpace::PrintToJSONObject(JSONObject* object) const {
-  auto isolate_group = IsolateGroup::Current();
-  ASSERT(isolate_group != nullptr);
-  JSONObject space(object, "old");
-  space.AddProperty("type", "HeapSpace");
-  space.AddProperty("name", "old");
-  space.AddProperty("vmName", "PageSpace");
-  space.AddProperty("collections", collections());
-  space.AddProperty64("used", UsedInWords() * kWordSize);
-  space.AddProperty64("capacity", CapacityInWords() * kWordSize);
-  space.AddProperty64("external", ExternalInWords() * kWordSize);
-  space.AddProperty("time", MicrosecondsToSeconds(gc_time_micros()));
-  if (collections() > 0) {
-    int64_t run_time = isolate_group->UptimeMicros();
-    run_time = Utils::Maximum(run_time, static_cast<int64_t>(0));
-    double run_time_millis = MicrosecondsToMilliseconds(run_time);
-    double avg_time_between_collections =
-        run_time_millis / static_cast<double>(collections());
-    space.AddProperty("avgCollectionPeriodMillis",
-                      avg_time_between_collections);
-  } else {
-    space.AddProperty("avgCollectionPeriodMillis", 0.0);
-  }
-}
-
-class HeapMapAsJSONVisitor : public ObjectVisitor {
- public:
-  explicit HeapMapAsJSONVisitor(JSONArray* array) : array_(array) {}
-  virtual void VisitObject(ObjectPtr obj) {
-    array_->AddValue(obj->ptr()->HeapSize() / kObjectAlignment);
-    array_->AddValue(obj->GetClassId());
-  }
-
- private:
-  JSONArray* array_;
-};
-
-void PageSpace::PrintHeapMapToJSONStream(Isolate* isolate,
-                                         JSONStream* stream) const {
-  JSONObject heap_map(stream);
-  heap_map.AddProperty("type", "HeapMap");
-  heap_map.AddProperty("freeClassId", static_cast<intptr_t>(kFreeListElement));
-  heap_map.AddProperty("unitSizeBytes",
-                       static_cast<intptr_t>(kObjectAlignment));
-  heap_map.AddProperty("pageSizeBytes", kOldPageSizeInWords * kWordSize);
-  {
-    JSONObject class_list(&heap_map, "classList");
-    isolate->class_table()->PrintToJSONObject(&class_list);
-  }
-  {
-    // "pages" is an array [page0, page1, ..., pageN], each page of the form
-    // {"object_start": "0x...", "objects": [size, class id, size, ...]}
-    // TODO(19445): Use ExclusivePageIterator once HeapMap supports large pages.
-    HeapIterationScope iteration(Thread::Current());
-    MutexLocker ml(&pages_lock_);
-    MakeIterable();
-    JSONArray all_pages(&heap_map, "pages");
-    for (OldPage* page = pages_; page != NULL; page = page->next()) {
-      JSONObject page_container(&all_pages);
-      page_container.AddPropertyF("objectStart", "0x%" Px "",
-                                  page->object_start());
-      JSONArray page_map(&page_container, "objects");
-      HeapMapAsJSONVisitor printer(&page_map);
-      page->VisitObjects(&printer);
-    }
-    for (OldPage* page = exec_pages_; page != NULL; page = page->next()) {
-      JSONObject page_container(&all_pages);
-      page_container.AddPropertyF("objectStart", "0x%" Px "",
-                                  page->object_start());
-      JSONArray page_map(&page_container, "objects");
-      HeapMapAsJSONVisitor printer(&page_map);
-      page->VisitObjects(&printer);
-    }
-  }
-}
-#endif  // PRODUCT
-
 void PageSpace::WriteProtectCode(bool read_only) {
   if (FLAG_write_protect_code) {
     MutexLocker ml(&pages_lock_);
@@ -1604,6 +1592,7 @@ void PageSpace::WriteProtectCode(bool read_only) {
   }
 }
 
+/// 是否应该开始空闲标记清理
 bool PageSpace::ShouldStartIdleMarkSweep(int64_t deadline) {
   // To make a consistent decision, we should not yield for a safepoint in the
   // middle of deciding whether to perform an idle GC.
@@ -1616,9 +1605,8 @@ bool PageSpace::ShouldStartIdleMarkSweep(int64_t deadline) {
   {
     MonitorLocker locker(tasks_lock());
     if (tasks() > 0) {
-      // A concurrent sweeper is running. If we start a mark sweep now
-      // we'll have to wait for it, and this wait time is not included in
-      // mark_words_per_micro_.
+      // 并发的清理任务正在运行。如果我们现在开始标记清理算法就必须等待它结束。
+      // 等待时间不会被包括到 mark_words_per_micro_ 中
       return false;
     }
   }
@@ -1670,6 +1658,7 @@ bool PageSpace::ShouldPerformIdleMarkCompact(int64_t deadline) {
   return estimated_mark_compact_completion <= deadline;
 }
 
+/// 调用此函数在 OldPage 上回收垃圾
 void PageSpace::CollectGarbage(bool compact, bool finalize) {
   ASSERT(GrowthControlState());
 
@@ -1677,8 +1666,8 @@ void PageSpace::CollectGarbage(bool compact, bool finalize) {
 #if defined(TARGET_ARCH_IA32)
     return;  // Barrier not implemented.
 #else
-    if (!enable_concurrent_mark()) return;  // Disabled.
-    if (FLAG_marker_tasks == 0) return;     // Disabled.
+    if (!enable_concurrent_mark()) return;  // 禁用
+    if (FLAG_marker_tasks == 0) return;     // 禁用
 #endif
   }
 
@@ -1687,14 +1676,16 @@ void PageSpace::CollectGarbage(bool compact, bool finalize) {
   SafepointOperationScope safepoint_scope(thread);
 
   const int64_t pre_wait_for_sweepers = OS::GetCurrentMonotonicMicros();
-  // Wait for pending tasks to complete and then account for the driver task.
+  // 等待挂起的任务完成，然后对驱动程序任务进行说明。
   Phase waited_for;
   {
     MonitorLocker locker(tasks_lock());
+    
     waited_for = phase();
+    
     if (!finalize &&
         (phase() == kMarking || phase() == kAwaitingFinalization)) {
-      // Concurrent mark is already running.
+      // 并发标记正在运行
       return;
     }
 
@@ -1704,7 +1695,8 @@ void PageSpace::CollectGarbage(bool compact, bool finalize) {
     ASSERT(phase() == kAwaitingFinalization || phase() == kDone);
     set_tasks(1);
   }
-
+    
+  // 如果显示 GC 信息
   if (FLAG_verbose_gc) {
     const int64_t wait =
         OS::GetCurrentMonotonicMicros() - pre_wait_for_sweepers;
@@ -1717,16 +1709,15 @@ void PageSpace::CollectGarbage(bool compact, bool finalize) {
     }
   }
 
-  // Ensure that all threads for this isolate are at a safepoint (either
-  // stopped or in native code). We have guards around Newgen GC and oldgen GC
-  // to ensure that if two threads are racing to collect at the same time the
-  // loser skips collection and goes straight to allocation.
+    
+  // 确保此 Isolate 所有的线程都处于安全点（包括暂停的线程或者本地代码）。我们在新生代 GC和老生代 GC 之间设置警戒，以确保如
+  // 果两个线程同时进行收集，则失败的线程会跳过收集，直接进入分配。
   {
     CollectGarbageHelper(compact, finalize, pre_wait_for_sweepers,
                          pre_safe_point);
   }
 
-  // Done, reset the task count.
+  // 完成回收，通知所有线程恢复
   {
     MonitorLocker ml(tasks_lock());
     set_tasks(tasks() - 1);
@@ -1734,6 +1725,7 @@ void PageSpace::CollectGarbage(bool compact, bool finalize) {
   }
 }
 
+/// OldPage GC 实现
 void PageSpace::CollectGarbageHelper(bool compact,
                                      bool finalize,
                                      int64_t pre_wait_for_sweepers,
@@ -1753,6 +1745,7 @@ void PageSpace::CollectGarbageHelper(bool compact,
 
   NoSafepointScope no_safepoints;
 
+  // 打印空闲分区表
   if (FLAG_print_free_list_before_gc) {
     for (intptr_t i = 0; i < num_freelists_; i++) {
       OS::PrintErr("Before GC: Freelist %" Pd "\n", i);
@@ -1760,6 +1753,7 @@ void PageSpace::CollectGarbageHelper(bool compact,
     }
   }
 
+  // GC 之前确认 
   if (FLAG_verify_before_gc) {
     OS::PrintErr("Verifying before marking...");
     heap_->VerifyGC(phase() == kDone ? kForbidMarked : kAllowMarked);
@@ -1769,10 +1763,10 @@ void PageSpace::CollectGarbageHelper(bool compact,
   // Make code pages writable.
   if (finalize) WriteProtectCode(false);
 
-  // Save old value before GCMarker visits the weak persistent handles.
+  // 记录内存使用
   SpaceUsage usage_before = GetCurrentUsage();
 
-  // Mark all reachable old-gen objects.
+  // 标记所有可达的老生代对象
   if (marker_ == NULL) {
     ASSERT(phase() == kDone);
     marker_ = new GCMarker(isolate_group, heap_);
@@ -1786,6 +1780,7 @@ void PageSpace::CollectGarbageHelper(bool compact,
     return;
   }
 
+  /// 标记所有的可达对象
   marker_->MarkObjects(this);
   usage_.used_in_words = marker_->marked_words() + allocated_black_in_words_;
   allocated_black_in_words_ = 0;
@@ -1797,7 +1792,7 @@ void PageSpace::CollectGarbageHelper(bool compact,
 
   // Abandon the remainder of the bump allocation block.
   AbandonBumpAllocation();
-  // Reset the freelists and setup sweeping.
+  // 重置空闲分区表
   for (intptr_t i = 0; i < num_freelists_; i++) {
     freelists_[i].Reset();
   }
@@ -1812,8 +1807,7 @@ void PageSpace::CollectGarbageHelper(bool compact,
       OS::PrintErr(" done.\n");
     }
 
-    // Executable pages are always swept immediately to simplify
-    // code protection.
+    // 可执行的页面总是被立即清除，以简化内存保护
 
     TIMELINE_FUNCTION_GC_DURATION(thread, "SweepExecutable");
     GCSweeper sweeper;
@@ -1823,10 +1817,14 @@ void PageSpace::CollectGarbageHelper(bool compact,
     MutexLocker ml(freelist->mutex());
     while (page != NULL) {
       OldPage* next_page = page->next();
+      // 清理指定的页面，返回清理后页面使用的内存大小
       bool page_in_use = sweeper.SweepPage(page, freelist, true /*is_locked*/);
+      // 有正在使用的内存则串联成新的链表
       if (page_in_use) {
         prev_page = page;
-      } else {
+      } 
+      // 如果 page_in_use == 0 则页面为空，释放此页 
+      else {
         FreePage(page, prev_page);
       }
       // Advance to the next page.
@@ -1836,13 +1834,18 @@ void PageSpace::CollectGarbageHelper(bool compact,
     mid3 = OS::GetCurrentMonotonicMicros();
   }
 
+  // 如果使用整理算法
   if (compact) {
+    // 清理 Large page
     SweepLarge();
+    // 整理
     Compact(thread);
     set_phase(kDone);
   } else if (FLAG_concurrent_sweep) {
+    // 并发清理
     ConcurrentSweep(isolate_group);
   } else {
+    // 不使用整理算法
     SweepLarge();
     Sweep();
     set_phase(kDone);
@@ -1877,6 +1880,7 @@ void PageSpace::CollectGarbageHelper(bool compact,
   }
 }
 
+// 清理 Large page
 void PageSpace::SweepLarge() {
   TIMELINE_FUNCTION_GC_DURATION(Thread::Current(), "SweepLarge");
 
@@ -1897,6 +1901,7 @@ void PageSpace::SweepLarge() {
   }
 }
 
+// 清理算法实现
 void PageSpace::Sweep() {
   TIMELINE_FUNCTION_GC_DURATION(Thread::Current(), "Sweep");
 
@@ -1904,6 +1909,7 @@ void PageSpace::Sweep() {
 
   intptr_t shard = 0;
   const intptr_t num_shards = Utils::Maximum(FLAG_scavenger_tasks, 1);
+  // 锁定空闲分区表
   for (intptr_t i = 0; i < num_shards; i++) {
     DataFreeList(i)->mutex()->Lock();
   }
@@ -1914,6 +1920,7 @@ void PageSpace::Sweep() {
     OldPage* next_page = page->next();
     ASSERT(page->type() == OldPage::kData);
     shard = (shard + 1) % num_shards;
+    // 清理页面，并且返回正在使用的内存大小
     bool page_in_use =
         sweeper.SweepPage(page, DataFreeList(shard), true /*is_locked*/);
     if (page_in_use) {
@@ -1936,12 +1943,20 @@ void PageSpace::Sweep() {
   }
 }
 
+// 并发清理
 void PageSpace::ConcurrentSweep(IsolateGroup* isolate_group) {
   // Start the concurrent sweeper task now.
-  GCSweeper::SweepConcurrent(isolate_group, pages_, pages_tail_, large_pages_,
-                             large_pages_tail_, &freelists_[OldPage::kData]);
+  GCSweeper::SweepConcurrent(
+      isolate_group,
+      pages_, 
+      pages_tail_, 
+      large_pages_,
+      large_pages_tail_, 
+      &freelists_[OldPage::kData]
+  );
 }
 
+// 整理
 void PageSpace::Compact(Thread* thread) {
   thread->isolate_group()->set_compaction_in_progress(true);
   GCCompactor compactor(thread, heap_);
@@ -2090,6 +2105,7 @@ static void EnsureEqualImagePages(OldPage* pages, OldPage* other_pages) {
 #endif
 }
 
+/// 合并空间
 void PageSpace::MergeFrom(PageSpace* donor) {
   donor->AbandonBumpAllocation();
 

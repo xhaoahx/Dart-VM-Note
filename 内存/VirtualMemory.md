@@ -6,7 +6,9 @@
 
 ```c++
 // ...
-
+/// Note:
+/// VirtualMemorty::AllocateAligned 和 VirtualMemory::Protect 在不同的平台有不同的实现
+/// 在 virtual_memory_xx.h 可以找到不同的实现
 namespace dart {
 
 // 虚拟内存

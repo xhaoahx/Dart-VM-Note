@@ -14,11 +14,18 @@ namespace dart {
 // the element at the address following the next_ field. All words written by
 // the freelist are guaranteed to look like Smis.
 // A FreeListElement never has its header mark bit set.
+
+// FreeListElement 描述一个 可利用空间表元素。最小的 FreeListElement 的大小是两个字。raw 对象的第二个单词用于保持一个 
+// next_指针，该指针指向链表中的元素。对于大于 tag 字段中可编码的对象大小的对象，元素的大小被嵌入到 next_ 字段后面的地址中。
+// 自由职业者编写的所有单词都保证看起来像smi。
+// FreeListElement 从不设置其头标记位。
 class FreeListElement {
  public:
+  /// 下一元素
   FreeListElement* next() const { return next_; }
   uword next_address() const { return reinterpret_cast<uword>(&next_); }
 
+  // 设置下一元素
   void set_next(FreeListElement* next) { next_ = next; }
 
   intptr_t HeapSize() {
@@ -27,13 +34,14 @@ class FreeListElement {
     return *SizeAddress();
   }
 
+  // 从地址、大小沟构造 FreeListElement
   static FreeListElement* AsElement(uword addr, intptr_t size);
 
   static void Init();
 
   static intptr_t HeaderSizeFor(intptr_t size);
 
-  // Used to allocate class for free list elements in Object::InitOnce.
+  // 用于在Object::InitOnce中为空闲列表元素分配类。
   class FakeInstance {
    public:
     FakeInstance() {}
@@ -68,12 +76,15 @@ class FreeListElement {
   DISALLOW_IMPLICIT_CONSTRUCTORS(FreeListElement);
 };
 
+/// 空闲分区表
 class FreeList {
  public:
   FreeList();
   ~FreeList();
 
+  // 在空闲分区表上分配 size 大小的空间
   uword TryAllocate(intptr_t size, bool is_protected);
+  // 将给定地址上 size 大小的空间归还给分区表
   void Free(uword addr, intptr_t size);
 
   void Reset();
@@ -84,21 +95,28 @@ class FreeList {
   uword TryAllocateLocked(intptr_t size, bool is_protected);
   void FreeLocked(uword addr, intptr_t size);
 
-  // Returns a large element, at least 'minimum_size', or NULL if none exists.
+  // 返回一个较大的元素，至少返回 'minimum_size'，如果不存在，则返回 NULL。
   FreeListElement* TryAllocateLarge(intptr_t minimum_size);
   FreeListElement* TryAllocateLargeLocked(intptr_t minimum_size);
 
-  // Allocates locked and unprotected memory, but only from small elements
-  // (i.e., fixed size lists).
+  // 分配一个较小的元素
   uword TryAllocateSmallLocked(intptr_t size) {
     DEBUG_ASSERT(mutex_.IsOwnedByCurrentThread());
+    /// 最后
     if (size > last_free_small_size_) {
       return 0;
     }
+    // size 映射到 index
     int index = IndexForSize(size);
+    // 如果给定下标有一个可用的（即 free_map_.Test(index) == true），则分出一个可用的 FreeListElement，
+    // 并且映射成地址
     if (index != kNumLists && free_map_.Test(index)) {
       return reinterpret_cast<uword>(DequeueElement(index));
     }
+    
+    /// 到达这个位置则表示 index 下标处没有可用的 FreeListElement，
+    // 则尝试在下一个有 FreeListElement 的 index 处提取一个 FreeListElement，
+    // index < 127, 
     if ((index + 1) < kNumLists) {
       intptr_t next_index = free_map_.Next(index + 1);
       if (next_index != -1) {
@@ -109,7 +127,8 @@ class FreeList {
     }
     return 0;
   }
-
+    
+  
   uword TryAllocateBumpLocked(intptr_t size) {
     ASSERT(mutex_.IsOwnedByCurrentThread());
     uword result = top_;
@@ -121,6 +140,8 @@ class FreeList {
     }
     return 0;
   }
+    
+  /// 提取 unaccounted_size_ 的值
   intptr_t TakeUnaccountedSizeLocked() {
     ASSERT(mutex_.IsOwnedByCurrentThread());
     intptr_t result = unaccounted_size_;
@@ -156,11 +177,15 @@ class FreeList {
   static const int kNumLists = 128;
   static const intptr_t kInitialFreeListSearchBudget = 1000;
 
+  // 将 size 映射成 index
   static intptr_t IndexForSize(intptr_t size) {
     ASSERT(size >= kObjectAlignment);
+    // size 是 kObjectAlignment 的整数倍
     ASSERT(Utils::IsAligned(size, kObjectAlignment));
 
+    // size 右移四位映射成 index
     intptr_t index = size >> kObjectAlignmentLog2;
+    // 如果是大对象，则分配在 128
     if (index >= kNumLists) {
       index = kNumLists;
     }
@@ -169,17 +194,24 @@ class FreeList {
 
   intptr_t LengthLocked(int index) const;
 
+  /// 添加一个 element 到指定 index
   void EnqueueElement(FreeListElement* element, intptr_t index);
   FreeListElement* DequeueElement(intptr_t index) {
+    // element 链表头
     FreeListElement* result = free_lists_[index];
     FreeListElement* next = result->next();
+    // 如果是空链表且不是最后一个 index
     if (next == NULL && index != kNumLists) {
+      // 计算原有 size
       intptr_t size = index << kObjectAlignmentLog2;
+      // 如果 size 等于 last_free_small_size_（最后一个 small size element）
       if (size == last_free_small_size_) {
         // Note: This is -1 * kObjectAlignment if no other small sizes remain.
+        // 
         last_free_small_size_ =
             free_map_.ClearLastAndFindPrevious(index) * kObjectAlignment;
       } else {
+        // 标记 index 有 element
         free_map_.Set(index, false);
       }
     }
@@ -194,25 +226,26 @@ class FreeList {
   void PrintSmall() const;
   void PrintLarge() const;
 
+  // 块指针区
   // Bump pointer region.
   uword top_ = 0;
   uword end_ = 0;
 
-  // Allocated from the bump pointer region, but not yet added to
-  // PageSpace::usage_. Used to avoid expensive atomic adds during parallel
-  // scavenge.
+  // 从块上区域分配的内存，但是还没有添加到 PageSpace::usage_。此域用于在并行清理时避免昂贵的原子加法
   intptr_t unaccounted_size_ = 0;
 
-  // Lock protecting the free list data structures.
+  // 锁定空闲分区表的数据结构
   mutable Mutex mutex_;
 
+  // 如果给定的 index 有空闲的的 element，则 free_map[index] = true
   BitSet<kNumLists> free_map_;
 
+  /// 静态分配列表长度 129
   FreeListElement* free_lists_[kNumLists + 1];
 
   intptr_t freelist_search_budget_ = kInitialFreeListSearchBudget;
 
-  // The largest available small size in bytes, or negative if there is none.
+  // 最大的的可用 small size 的 element，以字节表示。如果没有，则是负数
   intptr_t last_free_small_size_;
 
   DISALLOW_COPY_AND_ASSIGN(FreeList);
@@ -228,27 +261,19 @@ class FreeList {
 ## freelist.cc
 
 ```c++
-// Copyright (c) 2011, the Dart project authors.  Please see the AUTHORS file
-// for details. All rights reserved. Use of this source code is governed by a
-// BSD-style license that can be found in the LICENSE file.
-
-#include "vm/heap/freelist.h"
-
-#include "vm/bit_set.h"
-#include "vm/hash_map.h"
-#include "vm/lockers.h"
-#include "vm/object.h"
-#include "vm/os_thread.h"
-#include "vm/raw_object.h"
+// ...
 
 namespace dart {
 
+// 从给定的地址和大小转换成 element
+// 这个方法会破坏原有地址的数据，以保存空闲内存的信息（通常在释放其内存时调用）
 FreeListElement* FreeListElement::AsElement(uword addr, intptr_t size) {
   // Precondition: the (page containing the) header of the element is
   // writable.
   ASSERT(size >= kObjectAlignment);
   ASSERT(Utils::IsAligned(size, kObjectAlignment));
 
+  // 由于给定的地址包含对象头
   FreeListElement* result = reinterpret_cast<FreeListElement*>(addr);
 
   uint32_t tags = 0;
@@ -279,6 +304,7 @@ void FreeListElement::Init() {
   ASSERT(OFFSET_OF(FreeListElement, tags_) == Object::tags_offset());
 }
 
+
 intptr_t FreeListElement::HeaderSizeFor(intptr_t size) {
   if (size == 0) return 0;
   return ((size > ObjectLayout::SizeTag::kMaxSizeTag) ? 3 : 2) * kWordSize;
@@ -290,12 +316,14 @@ FreeList::FreeList() : mutex_() {
 
 FreeList::~FreeList() {
 }
-
+    
+// 未锁定分配
 uword FreeList::TryAllocate(intptr_t size, bool is_protected) {
   MutexLocker ml(&mutex_);
   return TryAllocateLocked(size, is_protected);
 }
 
+// 分配
 uword FreeList::TryAllocateLocked(intptr_t size, bool is_protected) {
   DEBUG_ASSERT(mutex_.IsOwnedByCurrentThread());
   // Precondition: is_protected is false or else all free list elements are
@@ -303,17 +331,26 @@ uword FreeList::TryAllocateLocked(intptr_t size, bool is_protected) {
 
   // Postcondition: if allocation succeeds, the allocated block is writable.
   int index = IndexForSize(size);
+  // 如果 index 小于 128（即可用使用小内存分配），并且对应的 index 有 element
   if ((index != kNumLists) && free_map_.Test(index)) {
     FreeListElement* element = DequeueElement(index);
     if (is_protected) {
       VirtualMemory::Protect(reinterpret_cast<void*>(element), size,
                              VirtualMemory::kReadWrite);
     }
+    /// 返回空闲的内存，以供进一步使用。这时的内存还保留着 element 的信息
     return reinterpret_cast<uword>(element);
   }
 
+  /// 到达这里，说明 index 处没有空闲的 element
+  
+  // 如果不是最大的小内存 index
   if ((index + 1) < kNumLists) {
+      
+    /// 寻找下一块可用使用的空闲 element（这一内存对应的 next_index 显然大于 index）
     intptr_t next_index = free_map_.Next(index + 1);
+      
+    // 找到了可以用的 index
     if (next_index != -1) {
       // Dequeue an element from the list, split and enqueue the remainder in
       // the appropriate list.
@@ -330,13 +367,17 @@ uword FreeList::TryAllocateLocked(intptr_t size, bool is_protected) {
         VirtualMemory::Protect(reinterpret_cast<void*>(element), region_size,
                                VirtualMemory::kReadWrite);
       }
+      // 将这一 element 之后的 element 入列（即链表操作）
       SplitElementAfterAndEnqueue(element, size, is_protected);
       return reinterpret_cast<uword>(element);
     }
   }
 
   FreeListElement* previous = NULL;
+  // current 在 large element 处
   FreeListElement* current = free_lists_[kNumLists];
+    
+  // 到达这里，small size element 已经不能满足分配，所以寻找一个更大的块
   // We are willing to search the freelist further for a big block.
   // For each successful free-list search we:
   //   * increase the search budget by #allocated-words
@@ -346,6 +387,7 @@ uword FreeList::TryAllocateLocked(intptr_t size, bool is_protected) {
   //
   // If we run out of search budget we fall back to allocating a new page and
   // reset the search budget.
+  // freelist_search_budget_ = 1000
   intptr_t tries_left = freelist_search_budget_ + (size >> kWordSizeLog2);
   while (current != NULL) {
     if (current->HeapSize() >= size) {
@@ -402,6 +444,7 @@ uword FreeList::TryAllocateLocked(intptr_t size, bool is_protected) {
   return 0;
 }
 
+// 释放给定地址
 void FreeList::Free(uword addr, intptr_t size) {
   MutexLocker ml(&mutex_);
   FreeLocked(addr, size);
@@ -409,15 +452,11 @@ void FreeList::Free(uword addr, intptr_t size) {
 
 void FreeList::FreeLocked(uword addr, intptr_t size) {
   DEBUG_ASSERT(mutex_.IsOwnedByCurrentThread());
-  // Precondition required by AsElement and EnqueueElement: the (page
-  // containing the) header of the freed block should be writable.  This is
-  // the case when called for newly allocated pages because they are
-  // allocated as writable.  It is the case when called during GC sweeping
-  // because the entire heap is writable.
   intptr_t index = IndexForSize(size);
+  // 调用 AsELement 会破坏地址原有的信息以保存内存的信息
   FreeListElement* element = FreeListElement::AsElement(addr, size);
+  // 将 element 归还给空闲分区表
   EnqueueElement(element, index);
-  // Postcondition: the (page containing the) header is left writable.
 }
 
 void FreeList::Reset() {
@@ -429,10 +468,12 @@ void FreeList::Reset() {
   }
 }
 
+// 将 element 加至指定的 index
 void FreeList::EnqueueElement(FreeListElement* element, intptr_t index) {
   FreeListElement* next = free_lists_[index];
   if (next == NULL && index != kNumLists) {
     free_map_.Set(index, true);
+    // 最大的可用 size
     last_free_small_size_ =
         Utils::Maximum(last_free_small_size_, index << kObjectAlignmentLog2);
   }
@@ -440,6 +481,7 @@ void FreeList::EnqueueElement(FreeListElement* element, intptr_t index) {
   free_lists_[index] = element;
 }
 
+// 求可用 element 数量
 intptr_t FreeList::LengthLocked(int index) const {
   DEBUG_ASSERT(mutex_.IsOwnedByCurrentThread());
   ASSERT(index >= 0);
@@ -451,91 +493,6 @@ intptr_t FreeList::LengthLocked(int index) const {
     element = element->next();
   }
   return result;
-}
-
-void FreeList::PrintSmall() const {
-  int small_sizes = 0;
-  int small_objects = 0;
-  intptr_t small_bytes = 0;
-  for (int i = 0; i < kNumLists; ++i) {
-    if (free_lists_[i] == NULL) {
-      continue;
-    }
-    small_sizes += 1;
-    intptr_t list_length = LengthLocked(i);
-    small_objects += list_length;
-    intptr_t list_bytes = list_length * i * kObjectAlignment;
-    small_bytes += list_bytes;
-    OS::PrintErr(
-        "small %3d [%8d bytes] : "
-        "%8" Pd " objs; %8.1f KB; %8.1f cum KB\n",
-        i, static_cast<int>(i * kObjectAlignment), list_length,
-        list_bytes / static_cast<double>(KB),
-        small_bytes / static_cast<double>(KB));
-  }
-}
-
-class IntptrPair {
- public:
-  IntptrPair() : first_(-1), second_(-1) {}
-  IntptrPair(intptr_t first, intptr_t second)
-      : first_(first), second_(second) {}
-
-  intptr_t first() const { return first_; }
-  intptr_t second() const { return second_; }
-  void set_second(intptr_t s) { second_ = s; }
-
-  bool operator==(const IntptrPair& other) {
-    return (first_ == other.first_) && (second_ == other.second_);
-  }
-
-  bool operator!=(const IntptrPair& other) {
-    return (first_ != other.first_) || (second_ != other.second_);
-  }
-
- private:
-  intptr_t first_;
-  intptr_t second_;
-};
-
-void FreeList::PrintLarge() const {
-  int large_sizes = 0;
-  int large_objects = 0;
-  intptr_t large_bytes = 0;
-  MallocDirectChainedHashMap<NumbersKeyValueTrait<IntptrPair> > map;
-  FreeListElement* node;
-  for (node = free_lists_[kNumLists]; node != NULL; node = node->next()) {
-    IntptrPair* pair = map.Lookup(node->HeapSize());
-    if (pair == NULL) {
-      large_sizes += 1;
-      map.Insert(IntptrPair(node->HeapSize(), 1));
-    } else {
-      pair->set_second(pair->second() + 1);
-    }
-    large_objects += 1;
-  }
-
-  MallocDirectChainedHashMap<NumbersKeyValueTrait<IntptrPair> >::Iterator it =
-      map.GetIterator();
-  IntptrPair* pair;
-  while ((pair = it.Next()) != NULL) {
-    intptr_t size = pair->first();
-    intptr_t list_length = pair->second();
-    intptr_t list_bytes = list_length * size;
-    large_bytes += list_bytes;
-    OS::PrintErr("large %3" Pd " [%8" Pd
-                 " bytes] : "
-                 "%8" Pd " objs; %8.1f KB; %8.1f cum KB\n",
-                 size / kObjectAlignment, size, list_length,
-                 list_bytes / static_cast<double>(KB),
-                 large_bytes / static_cast<double>(KB));
-  }
-}
-
-void FreeList::Print() const {
-  MutexLocker ml(&mutex_);
-  PrintSmall();
-  PrintLarge();
 }
 
 void FreeList::SplitElementAfterAndEnqueue(FreeListElement* element,
@@ -573,6 +530,7 @@ void FreeList::SplitElementAfterAndEnqueue(FreeListElement* element,
   }
 }
 
+// 分配大内存
 FreeListElement* FreeList::TryAllocateLarge(intptr_t minimum_size) {
   MutexLocker ml(&mutex_);
   return TryAllocateLargeLocked(minimum_size);
@@ -581,6 +539,7 @@ FreeListElement* FreeList::TryAllocateLarge(intptr_t minimum_size) {
 FreeListElement* FreeList::TryAllocateLargeLocked(intptr_t minimum_size) {
   DEBUG_ASSERT(mutex_.IsOwnedByCurrentThread());
   FreeListElement* previous = NULL;
+  // 指向 large element 区域
   FreeListElement* current = free_lists_[kNumLists];
   // TODO(koda): Find largest.
   // We are willing to search the freelist further for a big block.
@@ -599,7 +558,7 @@ FreeListElement* FreeList::TryAllocateLargeLocked(intptr_t minimum_size) {
       return current;
     } else if (tries_left-- < 0) {
       freelist_search_budget_ = kInitialFreeListSearchBudget;
-      return 0;  // Trigger allocation of new page.
+      return 0;  // 触发新页分配
     }
     previous = current;
     current = next;
@@ -607,6 +566,8 @@ FreeListElement* FreeList::TryAllocateLargeLocked(intptr_t minimum_size) {
   return NULL;
 }
 
+    
+// 合并分区表
 void FreeList::MergeFrom(FreeList* donor, bool is_protected) {
   // The [other] free list is from a dying isolate. There are no other threads
   // accessing it, so there is no need to lock here.

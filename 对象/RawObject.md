@@ -96,6 +96,9 @@ enum TypedDataElementType {
   friend class Deserializer;                                                   \
   friend class Pass2Visitor;
 
+/// dart virtual machine 中所有的对象都是以 kObjectAlignment 对其的，因此可以使用 size >> kObjectAlignment 来表示对象大
+/// 小，并且以 size << kObjectAlignment 来表示实际大小 
+      
 // RawObject 是所有原生对象的基类。尽管所有的原生对象都持有 tag 域，但并不是所有的原生对象都在堆上分配内存，因此不能解除引用
 // 关系， (e.g. RawSmi：原生小整数类)
 class ObjectLayout {
@@ -138,24 +141,29 @@ class ObjectLayout {
   // See Object::MakeUnusedSpaceTraversable.
   COMPILE_ASSERT(kCardRememberedBit == 0);
 
-  // Encodes the object size in the tag in units of object alignment.
+  // 将对象的实际大小编码为 tag
   class SizeTag {
    public:
     typedef intptr_t Type;
 
+    /// 大小标志的位数是 8 位，因此最多表示 2^8-1 = 255 位大小
     static constexpr intptr_t kMaxSizeTagInUnitsOfAlignment =
         ((1 << ObjectLayout::kSizeTagSize) - 1);
+    /// 最大的大小位 255 * 16
     static constexpr intptr_t kMaxSizeTag =
         kMaxSizeTagInUnitsOfAlignment * kObjectAlignment;
 
+    /// 将给定的 size 编码成 uword
     static UNLESS_DEBUG(constexpr) uword encode(intptr_t size) {
       return SizeBits::encode(SizeToTagValue(size));
     }
 
+    /// 在给定的 tag 中解码出 size
     static constexpr uword decode(uword tag) {
       return TagValueToSize(SizeBits::decode(tag));
     }
 
+    /// 更新给定的 tag 并返回新的 tag
     static UNLESS_DEBUG(constexpr) uword update(intptr_t size, uword tag) {
       return SizeBits::update(SizeToTagValue(size), tag);
     }
@@ -170,6 +178,9 @@ class ObjectLayout {
     class SizeBits
         : public BitField<uint32_t, intptr_t, kSizeTagPos, kSizeTagSize> {};
 
+    /// 将实际的 size 转换为 tag
+    // 如果 size > kMaxSizeTag，则为 0
+    // 否则返回 size >> kObjectAlignmentLog2
     static UNLESS_DEBUG(constexpr) intptr_t SizeToTagValue(intptr_t size) {
       DEBUG_ASSERT(Utils::IsAligned(size, kObjectAlignment));
       return !SizeFits(size) ? 0 : (size >> kObjectAlignmentLog2);
@@ -208,6 +219,7 @@ class ObjectLayout {
       : public BitField<uint32_t, intptr_t, kReservedTagPos, kReservedTagSize> {
   };
 
+  /// 对象头包含的标记
   class Tags {
    public:
     Tags() : tags_(0) {}
@@ -222,6 +234,7 @@ class ObjectLayout {
       return *reinterpret_cast<uint32_t*>(&tags_) = tags;
     }
 
+    /// 同步更新
     NO_SANITIZE_THREAD
     bool StrongCAS(uint32_t old_tags, uint32_t new_tags) {
       return tags_.compare_exchange_strong(old_tags, new_tags,
@@ -234,7 +247,7 @@ class ObjectLayout {
                                          std::memory_order_relaxed);
     }
 
-    /// 读取 tag 中的某一 Bool 位，TagBitField 类型参数为以上定义的继承自 BitField 的类
+    /// 读取 tag 中的某一数据位，TagBitField 类型参数为以上定义的继承自 BitField 的类
     template <class TagBitField>
     NO_SANITIZE_THREAD typename TagBitField::Type Read() const {
       return TagBitField::decode(*reinterpret_cast<const uint32_t*>(&tags_));
@@ -250,6 +263,7 @@ class ObjectLayout {
       }
     }
 
+    /// 异步更新 tag 中的某一数据位
     template <class TagBitField>
     NO_SANITIZE_THREAD void UpdateUnsynchronized(
         typename TagBitField::Type value) {
@@ -257,6 +271,7 @@ class ObjectLayout {
           TagBitField::update(value, *reinterpret_cast<uint32_t*>(&tags_));
     }
 
+    /// 获取 tag 中的某一 bool
     template <class TagBitField>
     NO_SANITIZE_THREAD bool TryAcquire() {
       uint32_t mask = TagBitField::encode(true);
@@ -264,6 +279,7 @@ class ObjectLayout {
       return !TagBitField::decode(old_tags);
     }
 
+    /// clear tag 中的某一 bool
     template <class TagBitField>
     NO_SANITIZE_THREAD bool TryClear() {
       uint32_t mask = ~TagBitField::encode(true);
@@ -324,7 +340,7 @@ class ObjectLayout {
 
   bool InVMIsolateHeap() const;
 
-  // 支持 GC 记住位。
+  // 支持 GC 记忆位
   bool IsRemembered() const {
     ASSERT(IsOldObject());
     return !tags_.Read<OldAndNotRememberedBit>();
@@ -357,7 +373,7 @@ class ObjectLayout {
   // 获取 classId
   intptr_t GetClassId() const { return tags_.Read<ClassIdTag>(); }
 
-  //
+  // 对象在堆上的大小
   intptr_t HeapSize() const {
     uint32_t tags = tags_;
     intptr_t result = SizeTag::decode(tags);
@@ -366,6 +382,7 @@ class ObjectLayout {
     }
     // 在堆上确定 Class 的大小
     result = HeapSizeFromClass(tags);
+    // size > kMaxSizeTag 时，SizeTag::decode 的结果才为 0
     ASSERT(result > SizeTag::kMaxSizeTag);
     return result;
   }

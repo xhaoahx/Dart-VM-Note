@@ -34,14 +34,14 @@ class FreeListElement {
     return *SizeAddress();
   }
 
-  // 从地址、大小沟构造 FreeListElement
+  // 从地址、大小构造 FreeListElement
   static FreeListElement* AsElement(uword addr, intptr_t size);
 
   static void Init();
 
   static intptr_t HeaderSizeFor(intptr_t size);
 
-  // 用于在Object::InitOnce中为空闲列表元素分配类。
+  // 用于在 Object::InitOnce 中为空闲列表元素分配类。
   class FakeInstance {
    public:
     FakeInstance() {}
@@ -57,7 +57,7 @@ class FreeListElement {
   };
 
  private:
-  // This layout mirrors the layout of RawObject.
+  // 此 Layout 映射了 RawObject Layout
   RelaxedAtomic<uint32_t> tags_;
 #if defined(HASH_IN_OBJECT_HEADER)
   uint32_t hash_;

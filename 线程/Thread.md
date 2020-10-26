@@ -49,6 +49,7 @@ class Thread;
 }  // namespace target
 }  // namespace compiler
 
+/// 可重用 Handle
 #define REUSABLE_HANDLE_LIST(V)                                                \
   V(AbstractType)                                                              \
   V(Array)                                                                     \
@@ -69,6 +70,7 @@ class Thread;
   V(TypeArguments)                                                             \
   V(TypeParameter)
 
+// 缓存 VM 存根
 #define CACHED_VM_STUBS_LIST(V)                                                \
   V(CodePtr, write_barrier_code_, StubCode::WriteBarrier().raw(), nullptr)     \
   V(CodePtr, array_write_barrier_code_, StubCode::ArrayWriteBarrier().raw(),   \
@@ -130,11 +132,17 @@ class Thread;
   V(CodePtr, call_native_through_safepoint_stub_,                              \
     StubCode::CallNativeThroughSafepoint().raw(), nullptr)
 
+// 缓存非 VM 存根
 #define CACHED_NON_VM_STUB_LIST(V)                                             \
+  // 空指针 
   V(ObjectPtr, object_null_, Object::null(), nullptr)                          \
+  // 常量 true 
   V(BoolPtr, bool_true_, Object::bool_true().raw(), nullptr)                   \
+  // 常量 false
   V(BoolPtr, bool_false_, Object::bool_false().raw(), nullptr)
 
+// VM 全局对象、地址在每一个线程之中的缓存
+// 注意：产量 false 必须直接跟在常量 true 之后
 // List of VM-global objects/addresses cached in each Thread object.
 // Important: constant false must immediately follow constant true.
 #define CACHED_VM_OBJECTS_LIST(V)                                              \
@@ -147,6 +155,7 @@ class Thread;
   ASSERT((Thread::bool_true_offset() + kWordSize) ==                           \
          Thread::bool_false_offset());
 
+// 缓存 VM 存根地址
 #define CACHED_VM_STUBS_ADDRESSES_LIST(V)                                      \
   V(uword, write_barrier_entry_point_, StubCode::WriteBarrier().EntryPoint(),  \
     0)                                                                         \
@@ -179,6 +188,7 @@ class Thread;
   V(uword, slow_type_test_entry_point_, StubCode::SlowTypeTest().EntryPoint(), \
     0)
 
+// 缓存地址
 #define CACHED_ADDRESSES_LIST(V)                                               \
   CACHED_VM_STUBS_ADDRESSES_LIST(V)                                            \
   V(uword, bootstrap_native_wrapper_entry_point_,                              \
@@ -205,6 +215,7 @@ class Thread;
   V(uword, float_zerow_address_,                                               \
     reinterpret_cast<uword>(&float_zerow_constant), 0)
 
+// 缓存常量表
 #define CACHED_CONSTANTS_LIST(V)                                               \
   CACHED_VM_OBJECTS_LIST(V)                                                    \
   CACHED_ADDRESSES_LIST(V)
@@ -214,21 +225,26 @@ enum class ValidationPolicy {
   kDontValidateFrames = 1,
 };
 
-// A VM thread; may be executing Dart code or performing helper tasks like
-// garbage collection or compilation. The Thread structure associated with
-// a thread is allocated by EnsureInit before entering an isolate, and destroyed
-// automatically when the underlying OS thread exits. NOTE: On Windows, CleanUp
-// must currently be called manually (issue 23474).
+// VM 线程。
+// 可能用于执行 Dart 代码或者执行 helper（例如垃圾回收或者编译）任务。此类与关联的线程是在进入一个 Isolate 之前， 
+// 通过 EnsureInit 函数类分配的，并且在底层操作系统线程退出的时候会自动地销毁。
+// 注意：在 Windows 平台，CleanUp 必须手动调用
 class Thread : public ThreadState {
  public:
-  // The kind of task this thread is performing. Sampled by the profiler.
+  // 此线程执行的任务
   enum TaskKind {
     kUnknownTask = 0x0,
+    // 赋值器，执行代码
     kMutatorTask = 0x1,
+    // 编译
     kCompilerTask = 0x2,
+    // 同步标记
     kMarkerTask = 0x4,
+    // 清理
     kSweeperTask = 0x8,
+    // 整理
     kCompactorTask = 0x10,
+    // 新生代垃圾回收
     kScavengerTask = 0x20,
   };
   // Converts a TaskKind to its corresponding C-String name.
@@ -236,7 +252,7 @@ class Thread : public ThreadState {
 
   ~Thread();
 
-  // The currently executing thread, or NULL if not yet initialized.
+  // 当前正在执行的线程，如果没有，返回 NULL
   static Thread* Current() {
 #if defined(HAS_C11_THREAD_LOCAL)
     return static_cast<Thread*>(OSThread::CurrentVMThread());
@@ -249,15 +265,14 @@ class Thread : public ThreadState {
 #endif
   }
 
-  // Makes the current thread enter 'isolate'.
+  // 使当前线程进入 Isolate
   static bool EnterIsolate(Isolate* isolate);
-  // Makes the current thread exit its isolate.
+  // 使当前线程退出 Isolate
   static void ExitIsolate();
 
-  // A VM thread other than the main mutator thread can enter an isolate as a
-  // "helper" to gain limited concurrent access to the isolate. One example is
-  // SweeperTask (which uses the class table, which is copy-on-write).
-  // TODO(koda): Properly synchronize heap access to expand allowed operations.
+  // 不同于 main mutator 线程的其他线程可以作为 helper 进入某个 Isolate 来获得对此 Isolate 的有限并发访问。
+  // 例如：SweeperTask（使用 class table，它是 写时拷贝的）
+  /// bypass_safepoint 用于无视安全点
   static bool EnterIsolateAsHelper(Isolate* isolate,
                                    TaskKind kind,
                                    bool bypass_safepoint = false);
@@ -268,14 +283,17 @@ class Thread : public ThreadState {
                                         bool bypass_safepoint);
   static void ExitIsolateGroupAsHelper(bool bypass_safepoint);
 
-  // Empties the store buffer block into the isolate.
+  // 释放存储块归还给 Isolate
   void ReleaseStoreBuffer();
   void AcquireMarkingStack();
   void ReleaseMarkingStack();
 
+  // 设置栈极限
   void SetStackLimit(uword value);
+  // 清空栈极限
   void ClearStackLimit();
 
+  // 访问当前的栈极限。
   // Access to the current stack limit for generated code. Either the true OS
   // thread's stack limit minus some headroom, or a special value to trigger
   // interrupts.
@@ -286,7 +304,7 @@ class Thread : public ThreadState {
     return OFFSET_OF(Thread, stack_limit_);
   }
 
-  // The true stack limit for this OS thread.
+  // 操作系统线程的栈极限
   static intptr_t saved_stack_limit_offset() {
     return OFFSET_OF(Thread, saved_stack_limit_);
   }
@@ -307,6 +325,7 @@ class Thread : public ThreadState {
     kOsrRequest = 0x1,  // Current stack overflow caused by OSR request.
   };
 
+  // 写屏障 mask
   uword write_barrier_mask() const { return write_barrier_mask_; }
 
   static intptr_t write_barrier_mask_offset() {
@@ -350,6 +369,7 @@ class Thread : public ThreadState {
     return OFFSET_OF(Thread, exit_through_ffi_);
   }
 
+  // 任务类型
   TaskKind task_kind() const { return task_kind_; }
 
   // Retrieves and clears the stack overflow flags.  These are set by
@@ -357,11 +377,13 @@ class Thread : public ThreadState {
   // stack overflow is called.
   uword GetAndClearStackOverflowFlags();
 
-  // Interrupt bits.
+  // 中断标记
   enum {
+    // VM 内部 检查：安全点，储存缓冲等
     kVMInterrupt = 0x1,  // Internal VM checks: safepoints, store buffers, etc.
+    // 处理带外消息的中断
     kMessageInterrupt = 0x2,  // An interrupt to process an out of band message.
-
+    
     kInterruptsMask = (kVMInterrupt | kMessageInterrupt),
   };
 
@@ -369,6 +391,8 @@ class Thread : public ThreadState {
   void ScheduleInterruptsLocked(uword interrupt_bits);
   ErrorPtr HandleInterrupts();
   uword GetAndClearInterrupts();
+    
+  // 是否处于中断状态
   bool HasScheduledInterrupts() const {
     return (stack_limit_ & kInterruptsMask) != 0;
   }
@@ -414,12 +438,13 @@ class Thread : public ThreadState {
     return OFFSET_OF(Thread, dart_stream_);
   }
 
-  // Is |this| executing Dart code?
+  // 此线程执行 Dart 代码？
   bool IsExecutingDartCode() const;
 
-  // Has |this| exited Dart code?
+  // 此线程退出 Dart 代码？
   bool HasExitedDartCode() const;
 
+  // 编译器状态
   CompilerState& compiler_state() {
     ASSERT(compiler_state_ != nullptr);
     return *compiler_state_;
@@ -495,11 +520,13 @@ class Thread : public ThreadState {
     return OFFSET_OF(Thread, top_exit_frame_info_);
   }
 
-  // Heap of the isolate that this thread is operating on.
+  // 此线程运行的 Isolate 持有的堆
   Heap* heap() const { return heap_; }
   static intptr_t heap_offset() { return OFFSET_OF(Thread, heap_); }
 
+  /// 线程栈栈顶
   uword top() const { return top_; }
+  /// 线程栈栈底
   uword end() const { return end_; }
   void set_top(uword top) { top_ = top; }
   void set_end(uword end) { end_ = end; }
@@ -577,6 +604,7 @@ class Thread : public ThreadState {
   LEAF_RUNTIME_ENTRY_LIST(DEFINE_OFFSET_METHOD)
 #undef DEFINE_OFFSET_METHOD
 
+  // 全局对象池
   ObjectPoolPtr global_object_pool() const { return global_object_pool_; }
   void set_global_object_pool(ObjectPoolPtr raw_value) {
     global_object_pool_ = raw_value;
@@ -592,13 +620,7 @@ class Thread : public ThreadState {
   static bool ObjectAtOffset(intptr_t offset, Object* object);
   static intptr_t OffsetFromThread(const RuntimeEntry* runtime_entry);
 
-#if defined(DEBUG)
-  // For asserts only. Has false positives when running with a simulator or
-  // SafeStack.
-  bool TopErrorHandlerIsSetJump() const;
-  bool TopErrorHandlerIsExitFrame() const;
-#endif
-
+  // VM 标志
   uword vm_tag() const { return vm_tag_; }
   void set_vm_tag(uword tag) { vm_tag_ = tag; }
   static intptr_t vm_tag_offset() { return OFFSET_OF(Thread, vm_tag_); }
@@ -653,28 +675,7 @@ class Thread : public ThreadState {
     return OFFSET_OF(Thread, async_stack_trace_);
   }
 
-#if defined(DEBUG)
-#define REUSABLE_HANDLE_SCOPE_ACCESSORS(object)                                \
-  void set_reusable_##object##_handle_scope_active(bool value) {               \
-    reusable_##object##_handle_scope_active_ = value;                          \
-  }                                                                            \
-  bool reusable_##object##_handle_scope_active() const {                       \
-    return reusable_##object##_handle_scope_active_;                           \
-  }
-  REUSABLE_HANDLE_LIST(REUSABLE_HANDLE_SCOPE_ACCESSORS)
-#undef REUSABLE_HANDLE_SCOPE_ACCESSORS
-
-  bool IsAnyReusableHandleScopeActive() const {
-#define IS_REUSABLE_HANDLE_SCOPE_ACTIVE(object)                                \
-  if (reusable_##object##_handle_scope_active_) {                              \
-    return true;                                                               \
-  }
-    REUSABLE_HANDLE_LIST(IS_REUSABLE_HANDLE_SCOPE_ACTIVE)
-    return false;
-#undef IS_REUSABLE_HANDLE_SCOPE_ACTIVE
-  }
-#endif  // defined(DEBUG)
-
+  /// 清除可重用 Handle
   void ClearReusableHandles();
 
 #define REUSABLE_HANDLE(object)                                                \
@@ -683,22 +684,18 @@ class Thread : public ThreadState {
 #undef REUSABLE_HANDLE
 
   /*
-   * Fields used to support safepointing a thread.
+   * 用于支持线程的安全点操作
    *
-   * - Bit 0 of the safepoint_state_ field is used to indicate if the thread is
-   *   already at a safepoint,
-   * - Bit 1 of the safepoint_state_ field is used to indicate if a safepoint
-   *   operation is requested for this thread.
-   * - Bit 2 of the safepoint_state_ field is used to indicate that the thread
-   *   is blocked for the safepoint operation to complete.
+   * - safepoint_state_ 的 0 Bit 被用于表示此线程是否处于安全点
+   * - safepoint_state_ 的 1 Bit 被用于表示此线程是否请求安全点操作
+   * - safepoint_state_ 的 0 Bit 被用于表示此线程处于阻塞状态以等待安全点操作完成
    *
-   * The safepoint execution state (described above) for a thread is stored in
-   * in the execution_state_ field.
-   * Potential execution states a thread could be in:
-   *   kThreadInGenerated - The thread is running jitted dart/stub code.
-   *   kThreadInVM - The thread is running VM code.
-   *   kThreadInNative - The thread is running native code.
-   *   kThreadInBlockedState - The thread is blocked waiting for a resource.
+   * 安全点执行状态（如上所述）储存在 execution_state_ 域中
+   * 线程可能的潜在的执行状态有：
+   *   kThreadInGenerated - 此线程正在执行 Dart 代码
+   *   kThreadInVM - 此线程正在运行 VM
+   *   kThreadInNative - 此线程正在执行 NATIVE 代码
+   *   kThreadInBlockedState - 此线程处于阻塞状态并且等待某个资源
    */
   static bool IsAtSafepoint(uword state) {
     return AtSafepointField::decode(state);
@@ -749,6 +746,7 @@ class Thread : public ThreadState {
     return BypassSafepointsField::update(value, state);
   }
 
+  /// 执行状态
   enum ExecutionState {
     kThreadInVM = 0,
     kThreadInGenerated,

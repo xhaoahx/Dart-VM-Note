@@ -15,7 +15,7 @@
 ```c++
 // ...
 
-// On iOS, thread_local requires iOS 9+.
+// 在 ios 平台上，local thread 要求 ios 9+
 #if !HOST_OS_IOS
 #define HAS_C11_THREAD_LOCAL 1
 #endif
@@ -49,6 +49,7 @@ class Mutex {
   explicit Mutex(NOT_IN_PRODUCT(const char* name = "anonymous mutex"));
   ~Mutex();
 
+  /// 是否被当前线程持有
   bool IsOwnedByCurrentThread() const;
 
  private:
@@ -58,6 +59,8 @@ class Mutex {
 
   MutexData data_;
   NOT_IN_PRODUCT(const char* name_);
+    
+/// 持有此互斥量的线程 
 #if defined(DEBUG)
   ThreadId owner_;
 #endif  // defined(DEBUG)
@@ -97,6 +100,7 @@ class OSThread : public BaseThread {
   static OSThread* CreateOSThread();
   ~OSThread();
 
+  /// 线程 id
   ThreadId id() const {
     ASSERT(id_ != OSThread::kInvalidThreadId);
     return id_;
@@ -109,6 +113,7 @@ class OSThread : public BaseThread {
   }
 #endif
 
+  // 线程名
   const char* name() const { return name_; }
 
   void SetName(const char* name);
@@ -120,6 +125,8 @@ class OSThread : public BaseThread {
     name_ = Utils::StrDup(name);
   }
 
+    
+  /// 时间线互斥
   Mutex* timeline_block_lock() const { return &timeline_block_lock_; }
 
   // 当持有 |timeline_block_lock_| 时才能安全访问
@@ -189,8 +196,11 @@ class OSThread : public BaseThread {
     }
     return os_thread;
   }
-  static void SetCurrent(OSThread* current) { SetCurrentTLS(current); }
+  static void SetCurrent(OSThread* current) { 
+      SetCurrentTLS(current); 
+  }
 
+/// 当前 VM 线程
 #if defined(HAS_C11_THREAD_LOCAL)
   static ThreadState* CurrentVMThread() { return current_vm_thread_; }
 #endif
@@ -205,6 +215,8 @@ class OSThread : public BaseThread {
     uword stack_size = OSThread::GetMaxStackSize() - headroom;
     return stack_size;
   }
+    
+    
   // 获取当前 TLS
   static BaseThread* GetCurrentTLS() {
     return reinterpret_cast<BaseThread*>(OSThread::GetThreadLocal(thread_key_));
@@ -212,6 +224,7 @@ class OSThread : public BaseThread {
   // 设置当前 TLS
   static void SetCurrentTLS(BaseThread* value);
 
+  /// 线程运行入点和析构器
   typedef void (*ThreadStartFunction)(uword parameter);
   typedef void (*ThreadDestructor)(void* parameter);
 
@@ -220,27 +233,40 @@ class OSThread : public BaseThread {
                    ThreadStartFunction function,
                    uword parameter);
 
+  /// 创建本地线程
   static ThreadLocalKey CreateThreadLocal(ThreadDestructor destructor = NULL);
   static void DeleteThreadLocal(ThreadLocalKey key);
+    
+  
   static uword GetThreadLocal(ThreadLocalKey key) {
     return ThreadInlineImpl::GetThreadLocal(key);
   }
   // 获取当前线程 Id
   static ThreadId GetCurrentThreadId();
   static void SetThreadLocal(ThreadLocalKey key, uword value);
+    
+  
   static intptr_t GetMaxStackSize();
+    
+    
   // 等待给定的线程结束
   static void Join(ThreadJoinId id);
+  
+  /// ThreadId 转换  
   static intptr_t ThreadIdToIntPtr(ThreadId id);
   static ThreadId ThreadIdFromIntPtr(intptr_t id);
+    
+  /// ThreadId 比较
   static bool Compare(ThreadId a, ThreadId b);
 
-  // 这个函数对于每个 OSThread 只能调用一次，并且只有当 retunred id 最终被传递给 OSThread::Join() 时才应该调用。
+  // 获取到 ThreadJoinId，在调用 OsThread::Join 的时候传递
+  // 这个函数对于每个 OSThread 只能调用一次，并且只有当 returned id 最终被传递给 OSThread::Join() 时才应该调用。
   static ThreadJoinId GetCurrentThreadJoinId(OSThread* thread);
 
   // 在 VM 初始化和关闭的时候调用
   static void Init();
 
+  /// 是否在线程表之中
   static bool IsThreadInList(ThreadId id);
 
   /// 禁止、允许创建 OS 线程
@@ -252,7 +278,10 @@ class OSThread : public BaseThread {
   // 栈缓冲区比例 0.5
   static constexpr float kStackSizeBufferFraction = 0.5;
 
+  /// 初始化时使用
+  // 无效 ThreadId
   static const ThreadId kInvalidThreadId;
+  // 无效 ThreadJoinI
   static const ThreadJoinId kInvalidThreadJoinId;
 
  private:
@@ -272,7 +301,11 @@ class OSThread : public BaseThread {
 #ifdef SUPPORT_TIMELINE
   static ThreadId GetCurrentThreadTraceId();
 #endif  // PRODUCT
+    
+  /// 从给定的线程中获取 OS Thread
   static OSThread* GetOSThreadFromThread(ThreadState* thread);
+    
+  // 添加线程到列表
   static void AddThreadToListLocked(OSThread* thread);
   static void RemoveThreadFromList(OSThread* thread);
   static OSThread* CreateAndSetUnknownThread();
@@ -287,9 +320,9 @@ class OSThread : public BaseThread {
   // 线程 Key 和 ID
   // 在不同操作系统的有不同的实现；
   // os_thread_win.h:
-  // typedef DWORD ThreadLocalKey;
-  // typedef DWORD ThreadId;
-  // typedef HANDLE ThreadJoinId;
+  //   typedef DWORD ThreadLocalKey;
+  //   typedef DWORD ThreadId;
+  //   typedef HANDLE ThreadJoinId;
   static ThreadLocalKey thread_key_;
   const ThreadId id_;
 
@@ -312,7 +345,7 @@ class OSThread : public BaseThread {
   uword stack_headroom_;
   ThreadState* thread_;
   
-  // 持有此 OS 线程的 ThreadPool::Worker
+  // 关联此 OS 线程的 ThreadPool::Worker
   // 如果 OS 线程还没有被线程池开始，那么此域时 nullptr。
   void* owning_thread_pool_worker_ = nullptr;
 
@@ -326,6 +359,7 @@ class OSThread : public BaseThread {
   static OSThread* thread_list_head_;
   static bool creation_enabled_;
 
+  /// 当前 VM 线程
 #if defined(HAS_C11_THREAD_LOCAL)
   static thread_local ThreadState* current_vm_thread_;
 #endif
@@ -353,7 +387,7 @@ class OSThreadIterator : public ValueObject {
   OSThread* next_;
 };
 
-// 监视器
+// 监视器，不同平台有不同实现
 class Monitor {
  public:
   enum WaitResult { kNotified, kTimedOut };
@@ -380,7 +414,7 @@ class Monitor {
   void Enter();
   void Exit();
 
-  // 等待
+  // 等待一定的时间
   WaitResult Wait(int64_t millis);
   WaitResult WaitMicros(int64_t micros);
 
@@ -399,6 +433,7 @@ class Monitor {
   DISALLOW_COPY_AND_ASSIGN(Monitor);
 };
 
+/// 是否被当前线程持有
 inline bool Mutex::IsOwnedByCurrentThread() const {
 #if defined(DEBUG)
   return owner_ == OSThread::GetCurrentThreadId();
@@ -432,7 +467,7 @@ bool OSThread::creation_enabled_ = false;
 thread_local ThreadState* OSThread::current_vm_thread_ = NULL;
 #endif
 
-/// 操作系统线程构造函数
+/// OSThread 构造函数
 OSThread::OSThread()
     : BaseThread(true),  // is_os_thread = true
       id_(OSThread::GetCurrentThreadId()),
@@ -557,7 +592,7 @@ static void DeleteThread(void* thread) {
   delete reinterpret_cast<OSThread*>(thread);
 }
 
-/// 初始化操作系统线程
+/// 初始化 OSThread
 void OSThread::Init() {
   // 初始化全局操作系统线程锁
   if (thread_list_lock_ == NULL) {
@@ -576,7 +611,8 @@ void OSThread::Init() {
   // 允许创建操作系统线程
   EnableOSThreadCreation();
 
-  // 创建新的操作系统线程并且设置为当前 TLS
+  /// 在初始化的线程上调用 OSThread::Init
+  // 创建新的 OSThread 并且设置为当前 TLS
   OSThread* os_thread = CreateOSThread();
   ASSERT(os_thread != NULL);
   OSThread::SetCurrent(os_thread);
@@ -694,6 +730,7 @@ void OSThread::RemoveThreadFromList(OSThread* thread) {
   }
 }
 
+/// 设置当前 TLS
 void OSThread::SetCurrentTLS(BaseThread* value) {
   // Provides thread-local destructors.
   SetThreadLocal(thread_key_, reinterpret_cast<uword>(value));
@@ -738,5 +775,607 @@ OSThread* OSThreadIterator::Next() {
 
 }  // namespace dart
 
+```
+
+
+
+## os_thread_win.h
+
+```c++
+// ...
+
+namespace dart {
+
+typedef DWORD ThreadLocalKey;
+typedef DWORD ThreadId;
+typedef HANDLE ThreadJoinId;
+
+static const ThreadLocalKey kUnsetThreadLocalKey = TLS_OUT_OF_INDEXES;
+
+class ThreadInlineImpl {
+ private:
+  ThreadInlineImpl() {}
+  ~ThreadInlineImpl() {}
+
+  /// 获取本地 TLS
+  static uword GetThreadLocal(ThreadLocalKey key) {
+    ASSERT(key != kUnsetThreadLocalKey);
+    return reinterpret_cast<uword>(TlsGetValue(key));
+  }
+
+  friend class OSThread;
+  friend unsigned int __stdcall ThreadEntry(void* data_ptr);
+
+  DISALLOW_ALLOCATION();
+  DISALLOW_COPY_AND_ASSIGN(ThreadInlineImpl);
+};
+
+class MutexData {
+ private:
+  MutexData() {}
+  ~MutexData() {}
+
+  SRWLOCK lock_;
+
+  friend class Mutex;
+
+  DISALLOW_ALLOCATION();
+  DISALLOW_COPY_AND_ASSIGN(MutexData);
+};
+
+class MonitorData {
+ private:
+  MonitorData() {}
+  ~MonitorData() {}
+
+  SRWLOCK lock_;
+  CONDITION_VARIABLE cond_;
+
+  friend class Monitor;
+
+  DISALLOW_ALLOCATION();
+  DISALLOW_COPY_AND_ASSIGN(MonitorData);
+};
+
+typedef void (*ThreadDestructor)(void* parameter);
+
+/// TLS 整体
+class ThreadLocalEntry {
+ public:
+  ThreadLocalEntry(
+      ThreadLocalKey key, 
+      ThreadDestructor destructor
+  ) : key_(key), destructor_(destructor) {}
+
+  ThreadLocalKey key() const { return key_; }
+
+  ThreadDestructor destructor() const { return destructor_; }
+
+ private:
+  ThreadLocalKey key_;
+  ThreadDestructor destructor_;
+
+  DISALLOW_ALLOCATION();
+};
+
+template <typename T>
+class MallocGrowableArray;
+
+/// 用于保存 TLS 的数据结构
+class ThreadLocalData : public AllStatic {
+ public:
+  static void RunDestructors();
+
+ private:
+  static void AddThreadLocal(ThreadLocalKey key, ThreadDestructor destructor);
+  static void RemoveThreadLocal(ThreadLocalKey key);
+
+  static Mutex* mutex_;
+  /// 添加，移除 TLS 都在 thread_locals 列表上进行
+  static MallocGrowableArray<ThreadLocalEntry>* thread_locals_;
+
+  static void Init();
+  static void Cleanup();
+
+  friend class OS;
+  friend class OSThread;
+};
+
+}  // namespace dart
+
+#endif  // RUNTIME_VM_OS_THREAD_WIN_H_
+
+```
+
+
+
+## os_thread_win.cc
+
+```c++
+// ...
+
+namespace dart {
+
+DEFINE_FLAG(int,
+            worker_thread_priority,
+            kMinInt,
+            "The thread priority the VM should use for new worker threads.");
+
+// This flag is flipped by platform_win.cc when the process is exiting.
+// TODO(zra): Remove once VM shuts down cleanly.
+bool private_flag_windows_run_tls_destructors = true;
+
+/// 用于开始线程的数据包
+class ThreadStartData {
+ public:
+  ThreadStartData(const char* name,
+                  OSThread::ThreadStartFunction function,
+                  uword parameter)
+      : name_(name), function_(function), parameter_(parameter) {}
+
+  const char* name() const { return name_; }
+  OSThread::ThreadStartFunction function() const { return function_; }
+  uword parameter() const { return parameter_; }
+
+ private:
+  const char* name_;
+  OSThread::ThreadStartFunction function_;
+  uword parameter_;
+
+  DISALLOW_COPY_AND_ASSIGN(ThreadStartData);
+};
+
+
+// 线程开始函数的实现，传递的参数是 ThreadStartData
+static unsigned int __stdcall ThreadEntry(void* data_ptr) {
+  if (FLAG_worker_thread_priority != kMinInt) {
+    if (SetThreadPriority(GetCurrentThread(), FLAG_worker_thread_priority) ==
+        0) {
+      FATAL2("Setting thread priority to %d failed: GetLastError() = %d\n",
+             FLAG_worker_thread_priority, GetLastError());
+    }
+  }
+
+  ThreadStartData* data = reinterpret_cast<ThreadStartData*>(data_ptr);
+
+  const char* name = data->name();
+  OSThread::ThreadStartFunction function = data->function();
+  uword parameter = data->parameter();
+  delete data;
+
+  // Create new OSThread object and set as TLS for new thread.
+  OSThread* thread = OSThread::CreateOSThread();
+  if (thread != NULL) {
+    OSThread::SetCurrent(thread);
+    thread->set_name(name);
+
+    // Call the supplied thread start function handing it its parameters.
+    function(parameter);
+  }
+
+  return 0;
+}
+
+/// 开始新的线程
+int OSThread::Start(const char* name,
+                    ThreadStartFunction function,
+                    uword parameter) {
+  ThreadStartData* start_data = new ThreadStartData(name, function, parameter);
+  uint32_t tid;
+    
+  /// _beginthreadex 是 windows 平台创建线程的函数，等同于 linux 的 pthread_create
+  // 其原型：
+  //  _ACRTIMP uintptr_t __cdecl _beginthreadex(
+  //  _In_opt_  void*                    _Security,
+  //  _In_      unsigned                 _StackSize,
+  //  _In_      _beginthreadex_proc_type _StartAddress,
+  //  _In_opt_  void*                    _ArgList,
+  //  _In_      unsigned                 _InitFlag,
+  //  _Out_opt_ unsigned*                _ThrdAddr
+  //  );
+  // ThreadEntry 是入口函数
+  uintptr_t thread = _beginthreadex(NULL, OSThread::GetMaxStackSize(),
+                                    ThreadEntry, start_data, 0, &tid);
+  if (thread == -1L || thread == 0) {
+#ifdef DEBUG
+    fprintf(stderr, "_beginthreadex error: %d (%s)\n", errno, strerror(errno));
+#endif
+    return errno;
+  }
+
+  // Close the handle, so we don't leak the thread object.
+  CloseHandle(reinterpret_cast<HANDLE>(thread));
+
+  return 0;
+}
+
+/// 无效 ID
+const ThreadId OSThread::kInvalidThreadId = 0;
+const ThreadJoinId OSThread::kInvalidThreadJoinId = NULL;
+
+/// 创建 TLS
+ThreadLocalKey OSThread::CreateThreadLocal(ThreadDestructor destructor) {
+  ThreadLocalKey key = TlsAlloc();
+  if (key == kUnsetThreadLocalKey) {
+    FATAL1("TlsAlloc failed %d", GetLastError());
+  }
+  ThreadLocalData::AddThreadLocal(key, destructor);
+  return key;
+}
+
+// 删除 TLS
+void OSThread::DeleteThreadLocal(ThreadLocalKey key) {
+  ASSERT(key != kUnsetThreadLocalKey);
+  BOOL result = TlsFree(key);
+  if (!result) {
+    FATAL1("TlsFree failed %d", GetLastError());
+  }
+  ThreadLocalData::RemoveThreadLocal(key);
+}
+
+// 最大栈大小：128 * 8 KB
+intptr_t OSThread::GetMaxStackSize() {
+  const int kStackSize = (128 * kWordSize * KB);
+  return kStackSize;
+}
+
+/// ::GetCurrentThreadId 为 Windows API，其原型为：
+// WINBASEAPI
+// DWORD
+// WINAPI
+// GetCurrentThreadId(
+//     VOID
+//     );
+ThreadId OSThread::GetCurrentThreadId() {
+  return ::GetCurrentThreadId();
+}
+
+#ifdef SUPPORT_TIMELINE
+ThreadId OSThread::GetCurrentThreadTraceId() {
+  return ::GetCurrentThreadId();
+}
+#endif  // PRODUCT
+
+ThreadJoinId OSThread::GetCurrentThreadJoinId(OSThread* thread) {
+  ASSERT(thread != NULL);
+  // Make sure we're filling in the join id for the current thread.
+  ThreadId id = GetCurrentThreadId();
+  ASSERT(thread->id() == id);
+  // Make sure the join_id_ hasn't been set, yet.
+  DEBUG_ASSERT(thread->join_id_ == kInvalidThreadJoinId);
+  HANDLE handle = OpenThread(SYNCHRONIZE, false, id);
+  ASSERT(handle != NULL);
+#if defined(DEBUG)
+  thread->join_id_ = handle;
+#endif
+  return handle;
+}
+
+    
+/// WaitForSingleObject 为 Windows API，其原型为：
+// WINBASEAPI
+// DWORD
+// WINAPI
+// WaitForSingleObject(
+//     _In_ HANDLE hHandle,
+//     _In_ DWORD dwMilliseconds
+//     );
+    
+/// CloseHandle 为 Windows API，其原型为：
+// WINBASEAPI
+// BOOL
+// WINAPI
+// CloseHandle(
+//     _In_ _Post_ptr_invalid_ HANDLE hObject
+//     );
+void OSThread::Join(ThreadJoinId id) {
+  HANDLE handle = static_cast<HANDLE>(id);
+  ASSERT(handle != NULL);
+  // 不限制超时的等待 handle
+  DWORD res = WaitForSingleObject(handle, INFINITE);
+  // 关闭 handle
+  CloseHandle(handle);
+  ASSERT(res == WAIT_OBJECT_0);
+}
+
+intptr_t OSThread::ThreadIdToIntPtr(ThreadId id) {
+  ASSERT(sizeof(id) <= sizeof(intptr_t));
+  return static_cast<intptr_t>(id);
+}
+
+ThreadId OSThread::ThreadIdFromIntPtr(intptr_t id) {
+  return static_cast<ThreadId>(id);
+}
+
+bool OSThread::Compare(ThreadId a, ThreadId b) {
+  return a == b;
+}
+
+bool OSThread::GetCurrentStackBounds(uword* lower, uword* upper) {
+// On Windows stack limits for the current thread are available in
+// the thread information block (TIB). Its fields can be accessed through
+// FS segment register on x86 and GS segment register on x86_64.
+#ifdef _WIN64
+  *upper = static_cast<uword>(__readgsqword(offsetof(NT_TIB64, StackBase)));
+#else
+  *upper = static_cast<uword>(__readfsdword(offsetof(NT_TIB, StackBase)));
+#endif
+  // Notice that we cannot use the TIB's StackLimit for the stack end, as it
+  // tracks the end of the committed range. We're after the end of the reserved
+  // stack area (most of which will be uncommitted, most times).
+  MEMORY_BASIC_INFORMATION stack_info;
+  memset(&stack_info, 0, sizeof(MEMORY_BASIC_INFORMATION));
+  size_t result_size =
+      VirtualQuery(&stack_info, &stack_info, sizeof(MEMORY_BASIC_INFORMATION));
+  ASSERT(result_size >= sizeof(MEMORY_BASIC_INFORMATION));
+  *lower = reinterpret_cast<uword>(stack_info.AllocationBase);
+  ASSERT(*upper > *lower);
+  // When the third last page of the reserved stack is accessed as a
+  // guard page, the second last page will be committed (along with removing
+  // the guard bit on the third last) _and_ a stack overflow exception
+  // is raised.
+  //
+  // http://blogs.msdn.com/b/satyem/archive/2012/08/13/thread-s-stack-memory-management.aspx
+  // explains the details.
+  ASSERT((*upper - *lower) >= (4u * 0x1000));
+  *lower += 4 * 0x1000;
+  return true;
+}
+
+#if defined(USING_SAFE_STACK)
+NO_SANITIZE_ADDRESS
+NO_SANITIZE_SAFE_STACK
+uword OSThread::GetCurrentSafestackPointer() {
+#error "SAFE_STACK is unsupported on this platform"
+  return 0;
+}
+
+NO_SANITIZE_ADDRESS
+NO_SANITIZE_SAFE_STACK
+void OSThread::SetCurrentSafestackPointer(uword ssp) {
+#error "SAFE_STACK is unsupported on this platform"
+}
+#endif
+
+void OSThread::SetThreadLocal(ThreadLocalKey key, uword value) {
+  ASSERT(key != kUnsetThreadLocalKey);
+  BOOL result = TlsSetValue(key, reinterpret_cast<void*>(value));
+  if (!result) {
+    FATAL1("TlsSetValue failed %d", GetLastError());
+  }
+}
+
+    
+/// MUTEX 实现，封装了对 读写锁 SRWlock 的操作
+Mutex::Mutex(NOT_IN_PRODUCT(const char* name))
+#if !defined(PRODUCT)
+    : name_(name)
+#endif
+{
+  InitializeSRWLock(&data_.lock_);
+#if defined(DEBUG)
+  // When running with assertions enabled we do track the owner.
+  owner_ = OSThread::kInvalidThreadId;
+#endif  // defined(DEBUG)
+}
+
+Mutex::~Mutex() {
+#if defined(DEBUG)
+  // When running with assertions enabled we do track the owner.
+  ASSERT(owner_ == OSThread::kInvalidThreadId);
+#endif  // defined(DEBUG)
+}
+
+void Mutex::Lock() {
+  AcquireSRWLockExclusive(&data_.lock_);
+#if defined(DEBUG)
+  // When running with assertions enabled we do track the owner.
+  owner_ = OSThread::GetCurrentThreadId();
+#endif  // defined(DEBUG)
+}
+
+bool Mutex::TryLock() {
+  if (TryAcquireSRWLockExclusive(&data_.lock_) != 0) {
+#if defined(DEBUG)
+    // When running with assertions enabled we do track the owner.
+    owner_ = OSThread::GetCurrentThreadId();
+#endif  // defined(DEBUG)
+    return true;
+  }
+  return false;
+}
+
+void Mutex::Unlock() {
+#if defined(DEBUG)
+  // When running with assertions enabled we do track the owner.
+  ASSERT(IsOwnedByCurrentThread());
+  owner_ = OSThread::kInvalidThreadId;
+#endif  // defined(DEBUG)
+  ReleaseSRWLockExclusive(&data_.lock_);
+}
+
+    
+/// Monitor 实现，封装了对 读写锁 SRWlock 的操作
+Monitor::Monitor() {
+  InitializeSRWLock(&data_.lock_);
+  InitializeConditionVariable(&data_.cond_);
+#if defined(DEBUG)
+  // When running with assertions enabled we track the owner.
+  owner_ = OSThread::kInvalidThreadId;
+#endif  // defined(DEBUG)
+}
+
+Monitor::~Monitor() {
+#if defined(DEBUG)
+  // When running with assertions enabled we track the owner.
+  ASSERT(owner_ == OSThread::kInvalidThreadId);
+#endif  // defined(DEBUG)
+}
+
+bool Monitor::TryEnter() {
+  // Attempt to pass the semaphore but return immediately.
+  if (TryAcquireSRWLockExclusive(&data_.lock_) != 0) {
+#if defined(DEBUG)
+    // When running with assertions enabled we do track the owner.
+    ASSERT(owner_ == OSThread::kInvalidThreadId);
+    owner_ = OSThread::GetCurrentThreadId();
+#endif  // defined(DEBUG)
+    return true;
+  }
+  return false;
+}
+
+void Monitor::Enter() {
+  AcquireSRWLockExclusive(&data_.lock_);
+
+#if defined(DEBUG)
+  // When running with assertions enabled we track the owner.
+  ASSERT(owner_ == OSThread::kInvalidThreadId);
+  owner_ = OSThread::GetCurrentThreadId();
+#endif  // defined(DEBUG)
+}
+
+void Monitor::Exit() {
+#if defined(DEBUG)
+  // When running with assertions enabled we track the owner.
+  ASSERT(IsOwnedByCurrentThread());
+  owner_ = OSThread::kInvalidThreadId;
+#endif  // defined(DEBUG)
+
+  ReleaseSRWLockExclusive(&data_.lock_);
+}
+
+Monitor::WaitResult Monitor::Wait(int64_t millis) {
+#if defined(DEBUG)
+  // When running with assertions enabled we track the owner.
+  ASSERT(IsOwnedByCurrentThread());
+  ThreadId saved_owner = owner_;
+  owner_ = OSThread::kInvalidThreadId;
+#endif  // defined(DEBUG)
+
+  Monitor::WaitResult retval = kNotified;
+  if (millis == kNoTimeout) {
+    SleepConditionVariableSRW(&data_.cond_, &data_.lock_, INFINITE, 0);
+  } else {
+    // Wait for the given period of time for a Notify or a NotifyAll
+    // event.
+    if (!SleepConditionVariableSRW(&data_.cond_, &data_.lock_, millis, 0)) {
+      ASSERT(GetLastError() == ERROR_TIMEOUT);
+      retval = kTimedOut;
+    }
+  }
+
+#if defined(DEBUG)
+  // When running with assertions enabled we track the owner.
+  ASSERT(owner_ == OSThread::kInvalidThreadId);
+  owner_ = OSThread::GetCurrentThreadId();
+  ASSERT(owner_ == saved_owner);
+#endif  // defined(DEBUG)
+  return retval;
+}
+
+Monitor::WaitResult Monitor::WaitMicros(int64_t micros) {
+  // TODO(johnmccutchan): Investigate sub-millisecond sleep times on Windows.
+  int64_t millis = micros / kMicrosecondsPerMillisecond;
+  if ((millis * kMicrosecondsPerMillisecond) < micros) {
+    // We've been asked to sleep for a fraction of a millisecond,
+    // this isn't supported on Windows. Bumps milliseconds up by one
+    // so that we never return too early. We likely return late though.
+    millis += 1;
+  }
+  return Wait(millis);
+}
+
+void Monitor::Notify() {
+  // When running with assertions enabled we track the owner.
+  ASSERT(IsOwnedByCurrentThread());
+  WakeConditionVariable(&data_.cond_);
+}
+
+void Monitor::NotifyAll() {
+  // When running with assertions enabled we track the owner.
+  ASSERT(IsOwnedByCurrentThread());
+  WakeAllConditionVariable(&data_.cond_);
+}
+
+/// 添加 TLS
+void ThreadLocalData::AddThreadLocal(ThreadLocalKey key,
+                                     ThreadDestructor destructor) {
+  ASSERT(thread_locals_ != NULL);
+  if (destructor == NULL) {
+    // We only care about thread locals with destructors.
+    return;
+  }
+  MutexLocker ml(mutex_);
+#if defined(DEBUG)
+  // Verify that we aren't added twice.
+  for (intptr_t i = 0; i < thread_locals_->length(); i++) {
+    const ThreadLocalEntry& entry = thread_locals_->At(i);
+    ASSERT(entry.key() != key);
+  }
+#endif
+  // Add to list.
+  thread_locals_->Add(ThreadLocalEntry(key, destructor));
+}
+
+/// 移除 TLS
+void ThreadLocalData::RemoveThreadLocal(ThreadLocalKey key) {
+  ASSERT(thread_locals_ != NULL);
+  MutexLocker ml(mutex_);
+  intptr_t i = 0;
+  for (; i < thread_locals_->length(); i++) {
+    const ThreadLocalEntry& entry = thread_locals_->At(i);
+    if (entry.key() == key) {
+      break;
+    }
+  }
+  if (i == thread_locals_->length()) {
+    // Not found.
+    return;
+  }
+  thread_locals_->RemoveAt(i);
+}
+
+// This function is executed on the thread that is exiting. It is invoked
+// by |OnDartThreadExit| (see below for notes on TLS destructors on Windows).
+void ThreadLocalData::RunDestructors() {
+  // If an OS thread is created but ThreadLocalData::Init has not yet been
+  // called, this method still runs. If this happens, there's nothing to clean
+  // up here. See issue 33826.
+  if (thread_locals_ == NULL) {
+    return;
+  }
+  ASSERT(mutex_ != NULL);
+  MutexLocker ml(mutex_);
+  for (intptr_t i = 0; i < thread_locals_->length(); i++) {
+    const ThreadLocalEntry& entry = thread_locals_->At(i);
+    // We access the exiting thread's TLS variable here.
+    void* p = reinterpret_cast<void*>(OSThread::GetThreadLocal(entry.key()));
+    // We invoke the constructor here.
+    entry.destructor()(p);
+  }
+}
+
+Mutex* ThreadLocalData::mutex_ = NULL;
+MallocGrowableArray<ThreadLocalEntry>* ThreadLocalData::thread_locals_ = NULL;
+
+/// ThreadLocalData 初始化
+void ThreadLocalData::Init() {
+  mutex_ = new Mutex();
+  thread_locals_ = new MallocGrowableArray<ThreadLocalEntry>();
+}
+
+void ThreadLocalData::Cleanup() {
+  if (mutex_ != NULL) {
+    delete mutex_;
+    mutex_ = NULL;
+  }
+  if (thread_locals_ != NULL) {
+    delete thread_locals_;
+    thread_locals_ = NULL;
+  }
+}
+
+}  // namespace dart
 ```
 
